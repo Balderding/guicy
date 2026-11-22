@@ -370,3 +370,23 @@ a budget either fixes it or reports why before moving on.
 8. **Tests are part of the library.** Offscreen frames, BMP shots and scripted input come with
    `guicy.h`, so every app using it gets hidden, focus-free tests with no extra code. *Proof:* the
    three ports drive their selftests through `gy_script` and `gy_shot`.
+
+## 9. Master Control review (2026-11-22): GO, after the X: move
+
+1. **Scope gate.** Do steps 0-5 first (baseline, skeleton, core and CPU renderer, idle and dirty
+   tiles, the rest of v1, the asm race). Then STOP and show the user the gytest pictures and
+   BENCH.md before any app port (step 6). The three apps are mid-work, so a port is a big change
+   they need to hear about first.
+2. **Ports are coordinated through Master Control.** Each one happens on a branch while that
+   app's session holds its UI changes, never while that session is editing the same file.
+3. **Keep a `GUICY_USE_CRT` switch** beside the no-libc build, so a bug can be bisected against
+   the CRT versions.
+4. **fxc on C:.** Master Control asks the user once. The checked-in shader headers keep builds
+   independent of it either way.
+5. **gytest and gybench follow the single-exe and resizable rules too.** Keep guicy\work small
+   (400 GB cap on X:): prune the golden pictures to what is needed, and give the work folder's
+   size in each done-report.
+6. **Step 0's inventory maps the apps' own helpers** (voxup's nk_ext.c splitter, wrap label and
+   tooltip; pixelhunter's label_fit) to gy_ calls, so nothing they rely on is missed.
+
+Repo: private on GitHub (Balderding/guicy) at the user's word, 2026-11-22.
