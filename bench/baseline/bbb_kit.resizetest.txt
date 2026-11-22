@@ -1,0 +1,7 @@
+how_many_after_typing_1_5 15
+thick_frame 1
+maximize_box 1
+start 1650x1240
+larger 2154x1501
+smallest 921x560
+scroll_max_small 823

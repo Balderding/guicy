@@ -1,0 +1,4 @@
+{"app": "pixelhunter", "exe_kb": 674, "desktop": "guicy_bench", "start_ms": 107, "visible": true, "idle_cpu_ms_per_60s": 781.2, "idle_cpu_pct_core": 1.302, "move_cpu_ms_each": 7.209, "client": [1540, 950], "peak_ws_mb": 122.1}
+{"app": "bbb_kit", "exe_kb": 23608, "desktop": "guicy_bench", "start_ms": 113, "visible": false, "idle_cpu_ms_per_60s": 15468.8, "idle_cpu_pct_core": 25.781, "move_cpu_ms_each": 3.945, "client": [1, 1], "peak_ws_mb": 36.5}
+{"app": "voxup", "exe_kb": 86794, "desktop": "guicy_bench", "start_ms": 432, "visible": true, "idle_cpu_ms_per_60s": 15.6, "idle_cpu_pct_core": 0.026, "move_cpu_ms_each": 14.422, "client": [2560, 1369], "peak_ws_mb": 119.2}
+{"app": "bbb_kit", "note": "re-run with the real window", "start_ms": 497, "idle_cpu_ms_per_60s": 18890.6, "idle_cpu_pct_core": 31.484, "move_cpu_ms_each": 26.129, "client": [2176, 1183], "peak_ws_mb": 36.5}
