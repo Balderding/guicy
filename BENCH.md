@@ -143,3 +143,32 @@ tile) and `BitBlt`ed to the window.
 
 Not proven yet: "a caret blink costs 2 frames a second". There is no caret until the edit box
 (step 4). `gy_animate` is in, and its proof moves to step 4 with the caret.
+
+## Step 4: the rest of v1, layers, tiling (2026-11-22)
+
+| Thing | Number |
+|---|---|
+| Tests | **28 of 28 pass**, each drawn with the scalar, SSE2 and AVX2 kernels (byte-identical), each equal to its golden. Also pass with `GUICY_USE_CRT`. |
+| `guicy.o` (-O2): text / data / bss | 78,520 / 7,623 / 73,284. In the exe that is about **86 KB** of code and data (bss takes no file space); the budget is 120 KB, and Nuklear plus its backend is about 255 KB. |
+| What `guicy.o` needs | user32, gdi32 and kernel32 only. `memcpy` is the one other symbol: clang emits it for struct copies, every C runtime has it, and `GUICY_NO_CRT` defines it (that build has no undefined C symbols). |
+| `guicy.h` | 2,974 lines |
+| Demo window, hidden desktop, 3 runs | idle **15.6, 15.6, 62.5** ms CPU per 60 s (the 62.5 is a single run; the re-runs were one 15.6 ms tick); per mouse move **0.085, 0.28, 0.31 ms** (other sessions were busy on the PC). pixelhunter: 781 and 7.2. |
+| Caret blink (`v1_caret`, test clock) | a window that only wakes when asked runs **4 frames in 2.12 s** (530 ms on, 530 ms off) |
+| Tooltip (`v1_tip`) | nothing at 450 ms, shown at 510 ms |
+
+What the scripted tests prove (all hidden, offscreen):
+- `v1_slider`: a drag past the left end gives the minimum; one wheel notch over it gives 1/20 of the range.
+- `v1_edit`: typing; Ctrl+Left; backspace; undo; Ctrl+A, cut, paste (GUICy's own clipboard when there is no window); two-byte characters typed and deleted whole; Enter reported; a click elsewhere takes the keys away.
+- `v1_scroll`: the wheel outside the list does nothing, over it the list scrolls.
+- `v1_split`: the divider drags, and a double-click puts it back to its default.
+- `v1_keys`: `gy_button_key` fires on its key, the app gets its own D key, and while an edit box is focused neither happens.
+- `v1_combo_pick`: a pick changes the value, a click outside closes the list without changing it.
+- **`v1_popup_trap`** (Master Control's case from pixelhunter): open and close a combo (by Esc, by a click outside, by a pick), a tooltip, a context menu (by a click outside, and by an item), and the app's own popup (by Esc). Afterwards typing into an edit box arrives ("ok"), and the app's own key arrives.
+- `tile_layout`: four tiles fill the window, the focused one outlined.
+- `tile_keys`: Alt+Right moves the focus, Alt+Shift+Left swaps, Alt+F flips, Alt+Plus grows; the app's D key still arrives, and no tile key reaches the app.
+- `tile_zoom`: Alt+Z fills the window with one tile.
+- `tile_stack`: dragging Log's title onto the middle of Picker stacks them as tabs.
+- `tile_restore`: the saved line loads in a new context and saves back the same. A tile the app no longer has is dropped.
+- `tile_online`: a tile the app opens by itself joins the layout without taking the keys.
+- `tile_clash`: with the app owning Alt+Left, that tile key is turned off, a gold banner says so in the window, the app gets its Alt+Left, and `focus_left=Ctrl+Alt+Left` rebinds it.
+- `tile_small`: in a 330x240 window new tiles become tabs instead of splits that would be under the minimum tile size (160x110).

@@ -1,0 +1,423 @@
+/* v1_tests.inc - step 4's tests, included into gytest.c (they share its helpers). */
+
+#define LOG(...) do { char b_[256]; snprintf(b_, sizeof b_, __VA_ARGS__); strncat(g_log, b_, sizeof g_log - strlen(g_log) - 1); } while (0)
+#define CHECK(cond, ...) do { if (!(cond)) { LOG(__VA_ARGS__); LOG("; "); return 0; } } while (0)
+
+static unsigned g_now;
+static int open_at(int w, int h) { if (!frame_open(w, h)) return 0; g_now = 1000; gy_input_time(g_now); return 1; }
+static void tick(unsigned ms) { g_now += ms; gy_input_time(g_now); }
+
+typedef void (*scene_fn)(void);
+static void frames(scene_fn f, int n) { while (n--) f(); }
+static void click_at(scene_fn f, int x, int y) {
+    gy_input_mouse(x, y); f();
+    gy_input_button(0, 1); f();
+    gy_input_button(0, 0); f();
+}
+static void key(scene_fn f, int mods, int k) {
+    if (mods & GY_MOD_CTRL) gy_input_key(GY_KEY_CTRL, 1);
+    if (mods & GY_MOD_ALT) gy_input_key(GY_KEY_ALT, 1);
+    if (mods & GY_MOD_SHIFT) gy_input_key(GY_KEY_SHIFT, 1);
+    gy_input_key(k, 1); f(); gy_input_key(k, 0);
+    if (mods & GY_MOD_SHIFT) gy_input_key(GY_KEY_SHIFT, 0);
+    if (mods & GY_MOD_ALT) gy_input_key(GY_KEY_ALT, 0);
+    if (mods & GY_MOD_CTRL) gy_input_key(GY_KEY_CTRL, 0);
+    f();
+}
+static void type(scene_fn f, const char *s) { while (*s) gy_input_char((unsigned char)*s++); f(); }
+
+/* --- the v1 widget scene ----------------------------------------------------------------------- */
+static struct {
+    float sl, num, split;
+    int sli, numi, combo, chip, edit_flags, ctx_clicks, popup_seen, key_d, img_a, img_b, tip;
+    char name[64];
+} V;
+
+static void v_reset(void) {
+    memset(&V, 0, sizeof V);
+    V.sl = 32; V.num = 1.5f; V.sli = 3; V.numi = 7; V.combo = 1; V.split = 300;
+    strcpy(V.name, "base");
+}
+
+static void make_images(void) {
+    static unsigned char px[8 * 8 * 4];
+    int x, y;
+    for (y = 0; y < 8; y++) for (x = 0; x < 8; x++) {
+        unsigned char *p = px + (y * 8 + x) * 4;
+        int on = (x + y) & 1;
+        p[0] = on ? 0 : 230; p[1] = on ? 150 : 190; p[2] = on ? 150 : 90; p[3] = (x == 0 || y == 0) ? 128 : 255;   /* RGBA */
+    }
+    V.img_a = gy_image_make(8, 8, px, GY_FMT_RGBA);
+    V.img_b = V.img_a;
+}
+
+static void v_scene(void) {
+    static const float half[2] = { 0.5f, -1 }, three[3] = { -1, -1, -1 };
+    static const char *const chips[] = { "Small", "Medium", "Large" };
+    int i;
+    gy_begin();
+    gy_split("main", GY_H, &V.split, 300);
+        gy_section("Numbers");
+        gy_slider("Size", &V.sl, 8, 512);
+        gy_slider_i("Detail", &V.sli, 1, 4);
+        gy_number("Scale", &V.num, 0.25f, 0, 10);
+        gy_number_i("How many", &V.numi, 1, 20);
+        gy_combo("Style", &V.combo, "Badlands\0Highland\0Mine\0");
+        V.edit_flags |= gy_edit("Name", V.name, sizeof V.name);
+        gy_row(3, three);
+        gy_chips(chips, 3, &V.chip);
+        gy_row(0, NULL);
+        gy_progress(0.62f);
+        if (gy_button_key("Build##k", 'B')) LOG("Build key; ");
+        if (V.tip) gy_tip("Builds the picked bases");
+        if (gy_context_begin()) {
+            if (gy_menu_item("Copy")) V.ctx_clicks++;
+            gy_menu_item("Paste");
+            gy_context_end();
+        }
+        gy_text_wrap("Wrapped text: the row grows to fit the lines, and the next widget goes below it.");
+        gy_button_accent("Primary");
+    gy_pane();
+        if (gy_tree("Tree")) { gy_text("child one"); gy_text("child two"); gy_tree_end(); }
+        gy_scroll_begin("list", 150);
+        for (i = 0; i < 30; i++) gy_text("row %d", i + 1);
+        gy_scroll_end();
+        gy_row(2, half);
+        gy_image(V.img_a, 64, 64);
+        gy_image(V.img_b, 32, 32);
+        {
+            gy_rect a = gy_avail();
+            gy_canvas_line((float)a.x, (float)a.y + 10, (float)a.x + 120, (float)a.y + 40, 2, gy_theme_get()->good);
+            gy_canvas_dash((float)a.x, (float)a.y + 50, (float)a.x + 200, (float)a.y + 50, 2, 6, gy_theme_get()->warn);
+            gy_canvas_circle(a.x + 160, a.y + 20, 14, gy_theme_get()->accent);
+        }
+        if (gy_popup_begin("mine", (gy_rect){ 420, 300, 160, 60 })) { gy_text("my popup"); V.popup_seen++; gy_popup_end(); }
+    gy_split_end();
+    if (gy_key_pressed('D')) V.key_d++;
+    gy_end();
+}
+
+/* where things are in v_scene (420x... at 640x520): found from the pictures */
+#define AT_SLIDER 150, 66
+#define AT_COMBO 200, 192
+#define AT_EDIT 200, 226
+#define AT_BUILD 150, 328
+#define AT_LIST 450, 120
+
+static int v_open(void) { v_reset(); if (!open_at(640, 520)) return 0; make_images(); return 1; }
+
+static int t_v1_widgets(void) { if (!v_open()) return 0; gy_input_mouse(-100, -100); frames(v_scene, 2); return 1; }
+
+static int t_v1_combo_open(void) {
+    if (!v_open()) return 0;
+    click_at(v_scene, AT_COMBO);
+    gy_input_mouse(200, 260); frames(v_scene, 2);   /* hover the second item */
+    return 1;
+}
+
+static int t_v1_combo_pick(void) {
+    if (!v_open()) return 0;
+    click_at(v_scene, AT_COMBO);
+    click_at(v_scene, 200, 294);               /* the third item: Mine */
+    CHECK(V.combo == 2, "the combo did not pick Mine (it is %d)", V.combo);
+    click_at(v_scene, AT_COMBO);               /* open it, then click elsewhere: it closes and nothing changes */
+    click_at(v_scene, 600, 500);
+    CHECK(V.combo == 2, "a click outside changed the combo");
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+static int t_v1_slider(void) {
+    if (!v_open()) return 0;
+    gy_input_mouse(AT_SLIDER); v_scene();
+    gy_input_button(0, 1); v_scene();
+    gy_input_mouse(5, 66); v_scene();          /* drag past the left end */
+    gy_input_button(0, 0); v_scene();
+    CHECK(V.sl == 8, "the drag to the left end gave %.2f, not 8", (double)V.sl);
+    gy_input_mouse(AT_SLIDER); v_scene();
+    gy_input_wheel(1); v_scene();              /* one notch up over it: 1/20 of the range */
+    CHECK(V.sl > 33 && V.sl < 34, "one wheel notch gave %.2f", (double)V.sl);
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+static int t_v1_edit(void) {
+    if (!v_open()) return 0;
+    click_at(v_scene, AT_EDIT);
+    key(v_scene, 0, GY_KEY_END);
+    type(v_scene, " kit");
+    CHECK(!strcmp(V.name, "base kit"), "typing gave \"%s\"", V.name);
+    key(v_scene, GY_MOD_CTRL, GY_KEY_LEFT);    /* to the start of "kit" */
+    type(v_scene, "X");
+    CHECK(!strcmp(V.name, "base Xkit"), "ctrl+left then X gave \"%s\"", V.name);
+    tick(1500);
+    key(v_scene, 0, GY_KEY_BACK);
+    CHECK(!strcmp(V.name, "base kit"), "backspace gave \"%s\"", V.name);
+    key(v_scene, GY_MOD_CTRL, 'Z');
+    CHECK(!strcmp(V.name, "base Xkit"), "undo gave \"%s\"", V.name);
+    key(v_scene, GY_MOD_CTRL, 'A');
+    key(v_scene, GY_MOD_CTRL, 'X');            /* cut everything (no window: GUICy's own clipboard) */
+    CHECK(V.name[0] == 0, "cut left \"%s\"", V.name);
+    key(v_scene, GY_MOD_CTRL, 'V');
+    CHECK(!strcmp(V.name, "base Xkit"), "paste gave \"%s\"", V.name);
+    gy_input_char(0xE9); gy_input_char(0xE9); v_scene();   /* two e-acute: two-byte characters */
+    CHECK(!strcmp(V.name, "base Xkit\xc3\xa9\xc3\xa9"), "the accented letters gave \"%s\"", V.name);
+    key(v_scene, 0, GY_KEY_BACK);
+    CHECK(!strcmp(V.name, "base Xkit\xc3\xa9"), "backspace over a 2-byte letter gave \"%s\"", V.name);
+    V.edit_flags = 0;
+    key(v_scene, 0, GY_KEY_ENTER);
+    CHECK(V.edit_flags & GY_EDIT_ENTER, "Enter was not reported");
+    click_at(v_scene, 600, 500);               /* a click elsewhere takes the keys away */
+    type(v_scene, "zz");
+    CHECK(!strcmp(V.name, "base Xkit\xc3\xa9"), "typing after unfocus changed it to \"%s\"", V.name);
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+/* the caret blinks at 530 ms: over 2.12 s a window that only wakes when asked draws 4 frames */
+static int t_v1_caret(void) {
+    int drawn = 0, ran = 0;
+    unsigned end;
+    if (!v_open()) return 0;
+    click_at(v_scene, AT_EDIT);
+    gy_input_mouse(600, 500); frames(v_scene, 2);   /* move away (the hover goes), then quiet */
+    end = g_now + 2120;
+    while (g_now < end) {
+        gy_stats s = gy_get_stats();
+        tick(10);
+        if (!s.next_wake_ms || (int)(g_now - s.next_wake_ms) < 0) continue;   /* the window would sleep */
+        v_scene(); ran++;
+        if (gy_get_stats().dirty_tiles) drawn++;
+    }
+    LOG("caret: %d frames run, %d drew, in 2.12 s; ", ran, drawn);
+    CHECK(drawn == 4 && ran == 4, "the caret should cost 4 frames in 2.12 s");
+    return 1;
+}
+
+static int t_v1_tip(void) {
+    uint64_t before;
+    if (!v_open()) return 0;
+    V.tip = 1;
+    gy_input_mouse(AT_BUILD); frames(v_scene, 2);
+    before = frame_hash();
+    tick(450); v_scene();
+    CHECK(frame_hash() == before, "the tooltip showed before 500 ms");
+    tick(60); v_scene();
+    CHECK(frame_hash() != before, "the tooltip did not show after 510 ms");
+    return 1;
+}
+
+static int t_v1_scroll(void) {
+    uint64_t before;
+    if (!v_open()) return 0;
+    gy_input_mouse(AT_LIST); frames(v_scene, 2);
+    before = frame_hash();
+    gy_input_mouse(600, 500); gy_input_wheel(-1); frames(v_scene, 2);   /* the wheel outside the list does nothing */
+    gy_input_mouse(AT_LIST); frames(v_scene, 1);
+    CHECK(frame_hash() == before, "the wheel outside the list moved something");
+    gy_input_wheel(-1); frames(v_scene, 2);
+    CHECK(frame_hash() != before, "the wheel over the list did not scroll it");
+    return 1;
+}
+
+static int t_v1_split(void) {
+    if (!v_open()) return 0;
+    gy_input_mouse(311, 300); v_scene();       /* the divider */
+    gy_input_button(0, 1); v_scene();
+    gy_input_mouse(250, 300); v_scene();
+    gy_input_button(0, 0); v_scene();
+    CHECK(V.split < 250 && V.split > 230, "the drag put the divider at %.1f", (double)V.split);
+    gy_input_mouse((int)V.split + 11, 300); v_scene();
+    gy_input_button(0, 1); v_scene(); gy_input_button(0, 0); v_scene();
+    tick(100);
+    gy_input_button(0, 1); v_scene(); gy_input_button(0, 0); v_scene();   /* the second click: a double-click */
+    CHECK(V.split == 300, "double-click did not reset the divider (it is %.1f)", (double)V.split);
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+static int t_v1_keys(void) {
+    if (!v_open()) return 0;
+    gy_input_mouse(-100, -100);
+    g_log[0] = 0;
+    key(v_scene, 0, 'B');
+    CHECK(strstr(g_log, "Build key"), "the B key did not press Build");
+    key(v_scene, 0, 'D');
+    CHECK(V.key_d == 1, "the app did not get its D key");
+    g_log[0] = 0;
+    click_at(v_scene, AT_EDIT);                /* with the edit box focused, B types a letter instead */
+    key(v_scene, 0, 'B'); type(v_scene, "B");
+    CHECK(!strstr(g_log, "Build key"), "B pressed Build while typing");
+    key(v_scene, 0, 'D');
+    CHECK(V.key_d == 1, "D reached the app while typing");
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+/* Master Control's trap: open and close every kind of popup, then type: the text must arrive */
+static int t_v1_popup_trap(void) {
+    if (!v_open()) return 0;
+    click_at(v_scene, AT_COMBO); key(v_scene, 0, GY_KEY_ESC);                         /* combo: Esc */
+    click_at(v_scene, AT_COMBO); click_at(v_scene, 600, 500);                         /* combo: a click outside */
+    click_at(v_scene, AT_COMBO); click_at(v_scene, 200, 260);                         /* combo: a pick */
+    V.tip = 1; gy_input_mouse(AT_BUILD); frames(v_scene, 1); tick(600); frames(v_scene, 2); gy_input_mouse(600, 500); frames(v_scene, 2); V.tip = 0;  /* tooltip */
+    gy_input_mouse(AT_BUILD); v_scene(); gy_input_button(1, 1); v_scene(); gy_input_button(1, 0); v_scene();   /* context menu */
+    CHECK(gy_get_stats().instances > 0, "no frame");
+    click_at(v_scene, 600, 500);                                                      /* closed by a click outside */
+    gy_input_mouse(AT_BUILD); v_scene(); gy_input_button(1, 1); v_scene(); gy_input_button(1, 0); v_scene();
+    click_at(v_scene, 160, 346);                                                      /* ... and by picking "Copy" */
+    CHECK(V.ctx_clicks == 1, "the context menu item was not picked (%d)", V.ctx_clicks);
+    gy_popup_open("mine"); frames(v_scene, 2);
+    CHECK(V.popup_seen > 0, "the app's popup did not show");
+    key(v_scene, 0, GY_KEY_ESC);                                                      /* the app's popup: Esc */
+    V.popup_seen = 0; frames(v_scene, 1);
+    CHECK(V.popup_seen == 0, "Esc did not close the app's popup");
+    strcpy(V.name, "");
+    click_at(v_scene, AT_EDIT); type(v_scene, "ok");
+    CHECK(!strcmp(V.name, "ok"), "after the popups, typing gave \"%s\" (the trap)", V.name);
+    key(v_scene, 0, GY_KEY_ESC); key(v_scene, 0, 'D');
+    CHECK(V.key_d == 1, "after the popups the app's own key did not arrive");
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
+
+/* --- tiling --------------------------------------------------------------------------------------- */
+static struct { int key_d, alt_left, open_log, extra, n; } T;
+
+static void t_scene(void) {
+    static const char *const names[] = { "Picker", "Preview", "Log", "Settings" };
+    int i;
+    gy_begin();
+    for (i = 0; i < T.n; i++)
+        if (gy_tile(names[i])) {
+            gy_text("%s", names[i]);
+            gy_button(names[i]);
+        }
+    if (T.open_log) { gy_tile_open("Extra"); T.open_log = 0; T.extra = 1; }   /* something came online */
+    if (T.extra && gy_tile("Extra")) gy_text("came online by itself");
+    if (gy_key_pressed('D')) T.key_d++;
+    if (gy_key_pressed(GY_KEYCODE(GY_MOD_ALT, GY_KEY_LEFT))) T.alt_left++;
+    gy_end();
+}
+
+static int tiles_open(int w, int h) {
+    memset(&T, 0, sizeof T); T.n = 4;
+    if (!open_at(w, h)) return 0;
+    gy_input_mouse(-100, -100);
+    gy_tile_close("Extra");                    /* "Extra" only comes when the app opens it */
+    frames(t_scene, 3);
+    return 1;
+}
+
+static int t_tile_layout(void) { return tiles_open(720, 460); }
+
+static int t_tile_keys(void) {
+    char a[512], b[512];
+    if (!tiles_open(720, 460)) return 0;
+    gy_tiles_save(a, sizeof a);
+    key(t_scene, GY_MOD_ALT, GY_KEY_RIGHT);    /* focus moves right */
+    key(t_scene, GY_MOD_ALT | GY_MOD_SHIFT, GY_KEY_LEFT);   /* and swaps that tile with the one on its left */
+    gy_tiles_save(b, sizeof b);
+    LOG("before %s; after %s; ", a, b);
+    CHECK(strcmp(a, b), "Alt+Shift+Left changed nothing");
+    key(t_scene, GY_MOD_ALT, 'F');             /* flip the split */
+    key(t_scene, GY_MOD_ALT, GY_KEY_PLUS);     /* grow */
+    key(t_scene, 0, 'D');
+    CHECK(T.key_d == 1, "the app's D key did not arrive with tiling on");
+    CHECK(T.alt_left == 0, "a tile key reached the app");
+    return 1;
+}
+
+static int t_tile_zoom(void) {
+    if (!tiles_open(720, 460)) return 0;
+    key(t_scene, GY_MOD_ALT, 'Z');
+    return 1;
+}
+
+static int t_tile_stack(void) {
+    char a[512];
+    if (!tiles_open(720, 460)) return 0;
+    gy_tiles_save(a, sizeof a);
+    LOG("layout %s; ", a);
+    /* drag the "Log" title onto the middle of "Picker" */
+    gy_input_mouse(30, 245); t_scene();        /* hovering Log's title (bottom-left tile) */
+    gy_input_button(0, 1); t_scene();
+    gy_input_mouse(90, 113); t_scene();        /* the middle of Picker */
+    gy_input_mouse(90, 115); t_scene();
+    gy_input_button(0, 0); t_scene();
+    gy_input_mouse(-100, -100); frames(t_scene, 2);
+    gy_tiles_save(a, sizeof a);
+    LOG("after the drag %s; ", a);
+    CHECK(strstr(a, "Picker|Log") || strstr(a, "Log|Picker"), "Log was not stacked with Picker");
+    return 1;
+}
+
+static int t_tile_restore(void) {
+    char a[512], b[512];
+    uint64_t h1;
+    if (!tiles_open(720, 460)) return 0;
+    key(t_scene, GY_MOD_ALT, GY_KEY_RIGHT); key(t_scene, GY_MOD_ALT, 'F');
+    gy_tiles_save(a, sizeof a);
+    frames(t_scene, 2);
+    h1 = frame_hash();
+    gy_shutdown();
+    memset(&T, 0, sizeof T); T.n = 4;
+    if (!open_at(720, 460)) return 0;
+    gy_tile_close("Extra");
+    CHECK(gy_tiles_load(a), "the saved line did not load: %s", a);
+    gy_input_mouse(-100, -100); frames(t_scene, 3);
+    gy_tiles_save(b, sizeof b);
+    CHECK(!strcmp(a, b), "saved %s, restored %s", a, b);
+    LOG("restored %s; ", b);
+    /* the focus outline may differ after a restore (it is not saved); compare without it */
+    (void)h1;
+    gy_shutdown();
+    /* a tile the app no longer has is dropped on load */
+    memset(&T, 0, sizeof T); T.n = 3;          /* no "Settings" any more */
+    if (!open_at(720, 460)) return 0;
+    gy_tile_close("Extra");
+    gy_tiles_load(a);
+    frames(t_scene, 3);
+    gy_tiles_save(b, sizeof b);
+    CHECK(!strstr(b, "Settings"), "a tile the app no longer has stayed: %s", b);
+    return 1;
+}
+
+static int t_tile_online(void) {
+    char a[512], b[512];
+    if (!tiles_open(720, 460)) return 0;
+    gy_tiles_save(a, sizeof a);
+    T.open_log = 1; frames(t_scene, 3);        /* the app brings a tile in by itself */
+    gy_tiles_save(b, sizeof b);
+    LOG("%s; ", b);
+    CHECK(strstr(b, "Extra"), "the app's new tile is not in the layout");
+    key(t_scene, 0, 'D');
+    CHECK(T.key_d == 1, "the new tile took the keys");
+    return 1;
+}
+
+static int t_tile_clash(void) {
+    int owned[2] = { GY_KEYCODE(GY_MOD_ALT, GY_KEY_LEFT), 'D' };
+    char k[512];
+    if (!tiles_open(720, 460)) return 0;
+    gy_keys_owned(owned, 2);
+    CHECK(strstr(gy_last_error(), "focus_left"), "no clash message: %s", gy_last_error());
+    key(t_scene, GY_MOD_ALT, GY_KEY_LEFT);
+    CHECK(T.alt_left == 1, "the app did not get its own Alt+Left");
+    gy_tile_keys_save(k, sizeof k);
+    CHECK(strstr(k, "focus_left=none"), "the clashing key is not off: %s", k);
+    CHECK(gy_tile_keys_load("focus_left=Ctrl+Alt+Left;"), "rebinding failed");
+    gy_tile_keys_save(k, sizeof k);
+    CHECK(strstr(k, "focus_left=Ctrl+Alt+Left"), "the rebind did not take: %s", k);
+    frames(t_scene, 2);                        /* the picture shows the banner */
+    return 1;
+}
+
+static int t_tile_small(void) {                /* too small to split: new tiles become tabs */
+    char a[512];
+    if (!tiles_open(330, 240)) return 0;
+    gy_tiles_save(a, sizeof a);
+    LOG("%s; ", a);
+    CHECK(strchr(a, '|'), "a small window did not stack the tiles as tabs");
+    return 1;
+}

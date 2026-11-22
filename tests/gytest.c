@@ -2,6 +2,7 @@
 
      gytest              run every test; print PASS/FAIL per test; exit code = number of failures
      gytest --update     take the current pictures as the new goldens (only after looking at them)
+     gytest --shots      also write every picture to work\out (they are written anyway when a test fails)
      gytest NAME...      run only the named tests
 
    Every test is drawn three times, with the scalar, SSE2 and AVX2 kernels, and the three frames
@@ -16,7 +17,7 @@
 #include <string.h>
 
 static int g_isa;                              /* the kernels the current run uses */
-static char g_log[4096];                       /* what a test reports (shown with its result) */
+static char g_log[16384];                       /* what a test reports (shown with its result) */
 
 static int frame_open(int w, int h) {
     if (!gy_offscreen(w, h)) return 0;
@@ -127,6 +128,8 @@ static int t_tiles(void) {
     return 1;
 }
 
+#include "v1_tests.inc"
+
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "blank", t_blank },
@@ -138,6 +141,25 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "disabled_hot", t_disabled_hot },
     { "click_check", t_click_check },
     { "tiles", t_tiles },
+    { "v1_widgets", t_v1_widgets },
+    { "v1_combo_open", t_v1_combo_open },
+    { "v1_combo_pick", t_v1_combo_pick },
+    { "v1_slider", t_v1_slider },
+    { "v1_edit", t_v1_edit },
+    { "v1_caret", t_v1_caret },
+    { "v1_tip", t_v1_tip },
+    { "v1_scroll", t_v1_scroll },
+    { "v1_split", t_v1_split },
+    { "v1_keys", t_v1_keys },
+    { "v1_popup_trap", t_v1_popup_trap },
+    { "tile_layout", t_tile_layout },
+    { "tile_keys", t_tile_keys },
+    { "tile_zoom", t_tile_zoom },
+    { "tile_stack", t_tile_stack },
+    { "tile_restore", t_tile_restore },
+    { "tile_online", t_tile_online },
+    { "tile_clash", t_tile_clash },
+    { "tile_small", t_tile_small },
 };
 #define NTESTS ((int)(sizeof TESTS / sizeof TESTS[0]))
 
@@ -153,8 +175,8 @@ static uint64_t fnv64(const uint32_t *px, int n, int w, int h) {
     return x;
 }
 
-static char g_names[64][32];
-static uint64_t g_hash[64];
+static char g_names[128][32];
+static uint64_t g_hash[128];
 static int g_nh;
 
 static void load_hashes(const char *path) {
@@ -162,7 +184,7 @@ static void load_hashes(const char *path) {
     char name[64];
     unsigned long long h;
     if (!f) return;
-    while (g_nh < 64 && fscanf(f, "%63s %llx", name, &h) == 2) { strncpy(g_names[g_nh], name, 31); g_hash[g_nh++] = h; }
+    while (g_nh < 128 && fscanf(f, "%63s %llx", name, &h) == 2) { strncpy(g_names[g_nh], name, 31); g_hash[g_nh++] = h; }
     fclose(f);
 }
 
@@ -180,11 +202,11 @@ static uint64_t frame_hash(void) { return fnv64(gy_pixels(), gy_width() * gy_hei
 
 int main(int argc, char **argv) {
     char out[MAX_PATH], hashes[MAX_PATH], *s;
-    int update = 0, fails = 0, ran = 0, i, a, named = 0;
+    int update = 0, fails = 0, ran = 0, i, a, named = 0, shots = 0;
     GetModuleFileNameA(NULL, g_root, MAX_PATH);
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\build */
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\guicy */
-    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "--update")) update = 1; else named = 1; }
+    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "--update")) update = 1; else if (!strcmp(argv[a], "--shots")) shots = 1; else named = 1; }
     snprintf(out, sizeof out, "%s\\work", g_root); CreateDirectoryA(out, NULL);
     snprintf(out, sizeof out, "%s\\work\\out", g_root); CreateDirectoryA(out, NULL);
     snprintf(hashes, sizeof hashes, "%s\\tests\\golden\\hashes.txt", g_root);
@@ -201,9 +223,11 @@ int main(int argc, char **argv) {
             g_isa = isa;
             if (!TESTS[i].fn()) { ok = 0; break; }
             h[isa] = fnv64(gy_pixels(), gy_width() * gy_height(), gy_width(), gy_height());
-            if (isa == GY_ISA_AVX2) {
+            if (isa == GY_ISA_AVX2) {          /* the picture: kept when asked, or when something is wrong */
+                int k2 = find_hash(TESTS[i].name);
                 snprintf(out, sizeof out, "%s\\work\\out\\%s.bmp", g_root, TESTS[i].name);
-                if (!gy_shot(out)) { ok = 0; break; }
+                if ((update || shots || k2 < 0 || g_hash[k2] != fnv64(gy_pixels(), gy_width() * gy_height(), gy_width(), gy_height()))
+                    && !gy_shot(out)) { ok = 0; break; }
             }
             gy_shutdown();
         }
