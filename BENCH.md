@@ -172,3 +172,62 @@ What the scripted tests prove (all hidden, offscreen):
 - `tile_online`: a tile the app opens by itself joins the layout without taking the keys.
 - `tile_clash`: with the app owning Alt+Left, that tile key is turned off, a gold banner says so in the window, the app gets its Alt+Left, and `focus_left=Ctrl+Alt+Left` rebinds it.
 - `tile_small`: in a 330x240 window new tiles become tabs instead of splits that would be under the minimum tile size (160x110).
+
+## Step 5: the kernel race, hand asm against C intrinsics (2026-11-22)
+
+`bench/gybench.c` (build: `build.cmd`, run: `build\gybench.exe`). Each asm kernel is checked for the
+same bytes as the C one on the same random input, at 6 sizes and 8 start offsets, and timed
+(median of 31 runs of about 1 ms, one core, buffer reset subtracted). The rule: asm stays only if
+bit-exact and at least 5 % faster at 1920 px.
+
+CPU: Intel(R) Core(TM) i9-10980XE CPU @ 3.00GHz
+
+| Kernel | asm version | pixels | C (intrinsics) ns/px | asm ns/px | asm vs C | bit-exact | verdict |
+|---|---|---|---|---|---|---|---|
+| fill, opaque | rep stosd | 16 | 0.397 | 0.477 | +20 % | yes |  |
+| fill, opaque | rep stosd | 128 | 0.083 | 0.088 | +6 % | yes |  |
+| fill, opaque | rep stosd | 256 | 0.062 | 0.060 | -3 % | yes |  |
+| fill, opaque | rep stosd | 512 | 0.066 | 0.030 | -55 % | yes |  |
+| fill, opaque | rep stosd | 1024 | 0.056 | 0.019 | -67 % | yes |  |
+| fill, opaque | rep stosd | 1920 | 0.054 | 0.017 | -68 % | yes | **asm kept** |
+| fill, opaque | AVX2 asm, 4 stores a loop | 16 | 0.392 | 0.418 | +7 % | yes |  |
+| fill, opaque | AVX2 asm, 4 stores a loop | 128 | 0.083 | 0.076 | -9 % | yes |  |
+| fill, opaque | AVX2 asm, 4 stores a loop | 256 | 0.062 | 0.063 | +1 % | yes |  |
+| fill, opaque | AVX2 asm, 4 stores a loop | 512 | 0.066 | 0.066 | +0 % | yes |  |
+| fill, opaque | AVX2 asm, 4 stores a loop | 1024 | 0.057 | 0.057 | -0 % | yes |  |
+| fill, opaque | AVX2 asm, 4 stores a loop | 1920 | 0.055 | 0.054 | -0 % | yes | C kept, asm dropped |
+| fill, blended | AVX2 asm | 16 | 0.562 | 0.595 | +6 % | yes |  |
+| fill, blended | AVX2 asm | 128 | 0.263 | 0.276 | +5 % | yes |  |
+| fill, blended | AVX2 asm | 256 | 0.236 | 0.246 | +4 % | yes |  |
+| fill, blended | AVX2 asm | 512 | 0.226 | 0.241 | +7 % | yes |  |
+| fill, blended | AVX2 asm | 1024 | 0.216 | 0.226 | +5 % | yes |  |
+| fill, blended | AVX2 asm | 1920 | 0.215 | 0.223 | +4 % | yes | C kept, asm dropped |
+| row blend | AVX2 asm | 16 | 0.430 | 0.539 | +25 % | yes |  |
+| row blend | AVX2 asm | 128 | 0.338 | 0.390 | +15 % | yes |  |
+| row blend | AVX2 asm | 256 | 0.323 | 0.374 | +16 % | yes |  |
+| row blend | AVX2 asm | 512 | 0.319 | 0.375 | +17 % | yes |  |
+| row blend | AVX2 asm | 1024 | 0.324 | 0.355 | +10 % | yes |  |
+| row blend | AVX2 asm | 1920 | 0.317 | 0.350 | +11 % | yes | C kept, asm dropped |
+| glyph blend | AVX2 asm | 16 | 0.661 | 0.751 | +14 % | yes |  |
+| glyph blend | AVX2 asm | 128 | 0.607 | 0.640 | +6 % | yes |  |
+| glyph blend | AVX2 asm | 256 | 0.620 | 0.637 | +3 % | yes |  |
+| glyph blend | AVX2 asm | 512 | 0.614 | 0.634 | +3 % | yes |  |
+| glyph blend | AVX2 asm | 1024 | 0.601 | 0.621 | +3 % | yes |  |
+| glyph blend | AVX2 asm | 1920 | 0.599 | 0.613 | +2 % | yes | C kept, asm dropped |
+
+
+**Result:**
+- **Kept: `rep stosd` for opaque fills of 512 pixels or more**, 55-68 % faster than the AVX2 store
+  loop on this CPU (fast strings). It's in `guicy.h` as `gy__asm_stosd`, used by the SSE2 and AVX2
+  fill kernels when the run is long enough. `GUICY_NO_ASM` turns it off. It's used when a whole
+  frame is cleared and for wide plain rectangles. It isn't used when a single 64-pixel tile is
+  cleared, which is below the 512-pixel threshold.
+- **Dropped:** the hand AVX2 fill loop (no faster), blended fill (4 % slower), row blend (11 % slower)
+  and glyph blend (2 % slower). They stay in `bench/gybench.c` so the race can be run again on
+  another CPU (an AMD Zen may differ), but they're not in the library.
+- **Found by the race:** the first run had the glyph asm **70 % faster**. The cause was the C side:
+  its 8-byte coverage load went through GUICy's own byte-by-byte copy helper. A plain unaligned
+  load made the C glyph kernel **3.4 times faster** (2.04 to 0.60 ns per pixel), and then the asm
+  no longer won. All 28 tests still pass with the same bytes on all three kernel sets.
+
+`guicy.o` after step 5: 78,600 / 7,599 / 73,284 (text / data / bss).

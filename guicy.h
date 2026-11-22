@@ -7,6 +7,7 @@
 
    Options (define before the include, in the implementation file):
        GUICY_USE_CRT   use the C library's memset/memcpy instead of GUICy's own (for bisecting bugs)
+       GUICY_NO_ASM    no hand-written assembly (the one kernel that won its race, see BENCH.md)
        GUICY_NO_CRT    the program has no C library: GUICy defines memcpy, memset and memmove, which
                        the compiler calls for struct copies (GUICy itself calls no C library function)
 
@@ -575,6 +576,30 @@ static void gy__glyph_scalar(uint32_t *d, const unsigned char *cov, int n, uint3
     for (i = 0; i < n; i++) if (cov[i]) d[i] = gy__over(d[i], gy__scale(col, cov[i]));
 }
 
+/* unaligned loads that are plain loads (not a call to GUICy's byte-by-byte copy) */
+typedef int32_t gy__u32u __attribute__((aligned(1), may_alias));
+typedef int64_t gy__u64u __attribute__((aligned(1), may_alias));
+
+/* Assembly that won its race (bench/gybench.c, BENCH.md step 5): `rep stosd` fills an opaque run of
+   512+ pixels 55-68 % faster than the AVX2 store loop on this PC (fast strings, ERMSB), with the
+   same bytes. Shorter runs are faster with the loop, so the kernels below pick by length. */
+#ifndef GUICY_NO_ASM
+/* void gy__asm_stosd(uint32_t *d, int n, uint32_t s), Windows x64: d in rcx, n in edx, s in r8d;
+   rdi is callee-saved, so it is kept in r9 */
+__asm__(".text\n"
+        ".globl gy__asm_stosd\n"
+        "gy__asm_stosd:\n"
+        "    movq %rdi, %r9\n"
+        "    movq %rcx, %rdi\n"
+        "    movl %edx, %ecx\n"
+        "    movl %r8d, %eax\n"
+        "    rep stosl\n"
+        "    movq %r9, %rdi\n"
+        "    ret\n");
+void gy__asm_stosd(uint32_t *d, int n, uint32_t s);
+#define GY__STOSD_MIN 512
+#endif
+
 /* SSE2: 4 pixels at a time in 16-bit lanes */
 static __m128i gy__sse_div255(__m128i x) {
     x = _mm_add_epi16(x, _mm_set1_epi16(128));
@@ -594,6 +619,9 @@ static __m128i gy__sse_over4(__m128i d, __m128i s) {
 static void gy__fill_sse2(uint32_t *d, int n, uint32_t s) {
     int i = 0;
     __m128i sv = _mm_set1_epi32((int)s);
+#ifdef GY__STOSD_MIN
+    if ((s >> 24) == 255 && n >= GY__STOSD_MIN) { gy__asm_stosd(d, n, s); return; }
+#endif
     if ((s >> 24) == 255) { for (; i + 4 <= n; i += 4) _mm_storeu_si128((__m128i *)(d + i), sv); }
     else if (!s) return;
     else for (; i + 4 <= n; i += 4) _mm_storeu_si128((__m128i *)(d + i), gy__sse_over4(_mm_loadu_si128((const __m128i *)(d + i)), sv));
@@ -610,9 +638,8 @@ static void gy__glyph_sse2(uint32_t *d, const unsigned char *cov, int n, uint32_
     __m128i z = _mm_setzero_si128();
     __m128i c16 = _mm_unpacklo_epi8(_mm_set1_epi32((int)col), z);   /* the colour, 2 pixels in 16-bit lanes */
     for (; i + 4 <= n; i += 4) {
-        int32_t k4;
+        int32_t k4 = *(const gy__u32u *)(const void *)(cov + i);
         __m128i k, dv, lo, hi;
-        gy__memcpy(&k4, cov + i, 4);
         if (!k4) continue;
         k = _mm_cvtsi32_si128(k4);
         k = _mm_unpacklo_epi8(k, k);
@@ -645,6 +672,9 @@ GY__AVX2 static __m256i gy__avx_over8(__m256i d, __m256i s) {
 GY__AVX2 static void gy__fill_avx2(uint32_t *d, int n, uint32_t s) {
     int i = 0;
     __m256i sv = _mm256_set1_epi32((int)s);
+#ifdef GY__STOSD_MIN
+    if ((s >> 24) == 255 && n >= GY__STOSD_MIN) { gy__asm_stosd(d, n, s); return; }
+#endif
     if ((s >> 24) == 255) { for (; i + 8 <= n; i += 8) _mm256_storeu_si256((__m256i *)(d + i), sv); }
     else if (!s) return;
     else for (; i + 8 <= n; i += 8) _mm256_storeu_si256((__m256i *)(d + i), gy__avx_over8(_mm256_loadu_si256((const __m256i *)(d + i)), sv));
@@ -661,10 +691,9 @@ GY__AVX2 static void gy__glyph_avx2(uint32_t *d, const unsigned char *cov, int n
     __m256i z = _mm256_setzero_si256();
     __m256i c16 = _mm256_unpacklo_epi8(_mm256_set1_epi32((int)col), z);
     for (; i + 8 <= n; i += 8) {
-        int64_t k8;
+        int64_t k8 = *(const gy__u64u *)(const void *)(cov + i);
         __m128i k, klo, khi;
         __m256i kk, dv, lo, hi;
-        gy__memcpy(&k8, cov + i, 8);
         if (!k8) continue;
         k = _mm_unpacklo_epi8(_mm_cvtsi64_si128(k8), _mm_cvtsi64_si128(k8));
         klo = _mm_unpacklo_epi16(k, k);                              /* pixels 0-3, each byte 4 times */
