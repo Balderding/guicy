@@ -204,7 +204,29 @@ result.
   of the wake cost for a one-tile hover. Added in its own step, only if the full-redraw number
   misses its budget. [cpu 3.3]
 
-### 3.12 Testing built in
+### 3.12 Tiling (the user's ask, 2026-11-22)
+An app's window works like a tiling window manager (i3/bspwm style) inside itself. Each part of a
+tool comes online in its own tile, and the tiles always fill the window between them: no
+overlaps and no floating windows to hunt for.
+- **The app's side is one call per tile:** `if (gy_tile("Preview")) { ...widgets... }`. The app
+  never computes a size. GUICy keeps the tiles in a binary split tree (each node is horizontal or
+  vertical, with a ratio), and tabs where tiles are stacked.
+- **New tiles:** opening one splits the focused tile; the longer side is split, and the other
+  tiles shrink to make room. The app can open a tile itself when something comes online (a
+  finished job, a download) with `gy_tile_open("Log")`. *Our call:* a tile the app opens never
+  takes focus or the keyboard from the tile the user is in. `gy_tile_close`, `gy_tile_focus`.
+- **Keys, one each, rebindable:** focus left/right/up/down, swap with a neighbour, grow and shrink,
+  flip a split between side-by-side and stacked, fill the window and back (zoom), close, and cycle
+  the tabs of a stack.
+- **Mouse:** drag a divider to resize, double-click it to reset, drag a tile's title bar onto
+  another tile to swap the two or to stack them as tabs (drop zones are shown while dragging).
+- **Remembered:** the tree is saved as one text line in the app's ini and restored at start. A tile
+  that is no longer in the app is dropped from the tree on load.
+- **The minimum size is respected:** a split that would make a tile smaller than its minimum is
+  turned into tabs instead.
+- It is built on the deferred box layout (3.3) and the splitter, so it adds about 600 lines.
+
+### 3.13 Testing built in
 - `gy_offscreen(w, h)` renders into memory with no window shown; `gy_shot(path)` writes a BMP of
   the current frame; `gy_script(path)` replays a text file of input (move, click, key, wait,
   shot). Reason: every proof below runs hidden, which the rules require, and each app gets this
@@ -253,7 +275,7 @@ int main(void) {
 | Status | `gy_progress`, `gy_tip` (500 ms delay built in), `gy_spacer` | nk_progress, nk_ext_tooltip, nk_spacing |
 | Images | `gy_image_make/update/free`, `gy_image(img, w, h)` | nk_image, nk_draw_image |
 | Layout | `gy_row`, `gy_row_h`, `gy_grid`, `gy_same_line`, `gy_place(rect)` | nk_layout_row_*, template, static, space, nk_ext_row |
-| Containers | `gy_scroll_begin/end`, `gy_tree/gy_tree_end`, `gy_panel_begin/end`, `gy_split/gy_pane/gy_split_end` | nk_group_*, nk_tree_*, nk_begin/end, nk_ext_splitter |
+| Containers | `gy_scroll_begin/end`, `gy_tree/gy_tree_end`, `gy_panel_begin/end`, `gy_split/gy_pane/gy_split_end`, `gy_tile/gy_tile_open/close/focus` (tiling, 3.12) | nk_group_*, nk_tree_*, nk_begin/end, nk_ext_splitter |
 | State | `gy_disable_begin/end`, `gy_push_col/gy_pop_col`, `gy_font(i)`, `gy_theme_set(&t)` | nk_widget_disable_*, nk_style_push/pop*, nk_style_set_font, nk_theme |
 | Canvas | `gy_canvas_rect/circle/line/dash/text/image`, `gy_last_rect()`, `gy_hovered()`, `gy_clicked(btn)` | nk_fill_*, nk_stroke_*, nk_draw_text, nk_widget_bounds, nk_input_is_mouse_* |
 | Platform | `gy_open/gy_attach/gy_event/gy_frame`, `gy_wake`, `gy_animate`, `gy_error(text)` | nk_gdi_*, nk_input_* |
@@ -266,7 +288,7 @@ sortable columns, widths in the cache), `gy_menubar/gy_menu/gy_menu_item` with k
 `gy_file_open/save` (the OS dialog, only on a click by the user, never in tests), `gy_font_pick`.
 
 **v4: windows** - movable and resizable inner windows, modal dialogs drawn inside the app (no OS
-message boxes), docking (split-node tree with tab stacks, saved as one text line in the app's ini).
+message boxes). Docking is covered by the v1 tiling (3.12).
 
 **Later:** charts (line, bar), a zoomable canvas with SDF or Slug text, multi-line rich text,
 drag and drop between widgets.
@@ -284,7 +306,7 @@ that reports changed-pixel count and max channel difference.
 | 1 | **Skeleton:** guicy.h layout, build.cmd (clang, `-Wall -Wextra -Werror`), `gytest` host, offscreen target, `gy_shot`, the dwrite.h and fxc probes (section 7). | Builds clean; `gytest` imports only OS DLLs (read from the import table); an empty GUICy exe size in BENCH.md; a blank offscreen BMP matches its golden byte for byte. |
 | 2 | **Core plus CPU renderer:** context, IDs, input, row layout, draw list, theme, FILL/FILL_COV/GLYPH kernels (SSE2 and AVX2), GDI glyph atlas; widgets text, button, check, select. | Golden pictures for each widget in each state (normal, hover, active, disabled) match byte for byte between runs; SSE2 and AVX2 pictures are identical; a scripted click test toggles the check and the log shows it. |
 | 3 | **Idle loop and dirty tiles.** | Idle CPU 0.0% over 60 s (CPU time delta under 20 ms); a hover over one button re-rasterizes at most 4 tiles; a caret blink costs 2 frames a second; frame-hash numbers in BENCH.md. |
-| 4 | **The rest of v1:** slider, number, combo, edit, scroll, tree, progress, tooltip, images (nearest and bilinear), disable, colour push/pop, fonts, theme table, split, grid, canvas calls, layers. | Golden pictures per widget; scripted tests for drag (slider, split), typing and undo (edit), wheel (scroll, number), double-click reset (split), the tooltip delay, `gy_button_key`. |
+| 4 | **The rest of v1:** slider, number, combo, edit, scroll, tree, progress, tooltip, images (nearest and bilinear), disable, colour push/pop, fonts, theme table, split, grid, canvas calls, layers, tiling (3.12). | Golden pictures per widget; scripted tests for drag (slider, split), typing and undo (edit), wheel (scroll, number), double-click reset (split), the tooltip delay, `gy_button_key`; tiling: open, close, swap, flip, zoom, stack-as-tabs and the key moves, each with a golden picture, plus the saved tree restoring the same picture after a restart. |
 | 5 | **`gybench` and the kernel race** (section 3.10), run as soon as the CPU kernels exist so every app port starts on the winners. | BENCH.md table: each kernel, intrinsics versus asm, ns per pixel at 3 sizes, bit-exact yes/no, kept or dropped. No asm stays without a winning row. |
 | 6 | **bbb_kit port** behind a build switch (Nuklear build kept): nk_side.c and nk_top become GUICy, the three themes become GUICy theme tables. | Old/new pictures side by side for each theme, plus a diff; the same act() calls logged for the same scripted clicks; frame ms and idle CPU against step 0; exe KB change. **The user's sign-off**, then Nuklear is removed from bbb_kit only after asking. |
 | 7 | **GPU renderer:** D3D11 loaded at run time, the shader bytecode headers, image textures, frame-hash skip, fallback chain, `GUICY_RENDER`. | GPU and CPU pictures of every golden scene differ by at most 1 level per channel on AA pixels and 0 on solid ones; forced cpu, warp and a simulated device-removed run all finish their scripts; GPU-path frame CPU ms and idle numbers in BENCH.md; KB added. |
