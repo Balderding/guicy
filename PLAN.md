@@ -217,7 +217,12 @@ overlaps and no floating windows to hunt for.
   takes focus or the keyboard from the tile the user is in. `gy_tile_close`, `gy_tile_focus`.
 - **Keys, one each, rebindable:** focus left/right/up/down, swap with a neighbour, grow and shrink,
   flip a split between side-by-side and stacked, fill the window and back (zoom), close, and cycle
-  the tabs of a stack.
+  the tabs of a stack. **All tile keys use one modifier** (Alt by default), so they never clash with
+  the apps' own keys (bbb_kit D/L/T/F/Enter/Esc; voxup F1-F12, Space, R, M, digits, Ctrl+Z,
+  Ctrl+[ ]; pixelhunter's own). The app passes a table of the keys it owns
+  (`gy_keys_owned(...)`), and at start GUICy refuses any tile binding that clashes, showing the
+  clash as text in the window and logging it. The bindings are rebindable in the app's ini.
+  *Proof:* a golden test where an app key still reaches the app while tiling is on.
 - **Mouse:** drag a divider to resize, double-click it to reset, drag a tile's title bar onto
   another tile to swap the two or to stack them as tabs (drop zones are shown while dragging).
 - **Remembered:** the tree is saved as one text line in the app's ini and restored at start. A tile
