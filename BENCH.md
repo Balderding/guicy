@@ -79,3 +79,18 @@ Until then, "CPU ms per mouse move" stands in for the frame cost.
 | bbb_kit | `nk_side(H)`, `nk_top(mx, mw)` | `gy_tile("Side")`, `gy_tile("Top")` or `gy_split` |
 | bbb_kit | `nkui_init`, `nkui_font_of`, `nkui_image` | `gy_attach(hwnd)`, `gy_font(i)`, `gy_image_make` |
 | bbb_kit | the card grid, drawn with its own GDI+ code (not Nuklear) | `gy_grid` + canvas, a separate decision at its port |
+
+## Step 1: the skeleton (2026-11-22)
+
+| Thing | Number |
+|---|---|
+| `guicy.o` (the library alone, -O2): text / data / bss | 1,798 / 544 / 664 = **3,006 B** |
+| What `guicy.o` needs from outside | `CloseHandle`, `CreateFileA`, `VirtualAlloc`, `VirtualFree`, `WriteFile` (kernel32). **No C library.** |
+| `gytest.exe` imports | kernel32 plus the Windows-shipped UCRT `api-ms-win-crt-*` (from the test host's stdio, not from GUICy) |
+| `gytest.exe` / `probe_dwrite.exe` | 50,176 B / 43,008 B |
+| `blank` golden (256x160) | equal byte for byte on repeated runs, and with `GUICY_USE_CRT` |
+| DirectWrite from plain C | works through the MinGW `dwrite.h` C vtables, loaded at run time: 457 font families, Segoe UI found |
+
+Found while proving: clang turns GUICy's own byte loop into a `memset` call, which would call
+itself forever without the CRT. `__attribute__((no_builtin("memset")))` on the helpers stops it,
+and `llvm-nm -u` now lists only the five kernel32 functions.

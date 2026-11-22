@@ -1,4 +1,6 @@
 work/
+build/
 *.o
 *.exe
 *.bmp
+!tests/golden/*.bmp
