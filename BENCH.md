@@ -112,3 +112,34 @@ bottom bands; the rows between reuse one precomputed row.
 Deviation from PLAN 3.8: there are no subpixel x phases yet. GDI's `GetGlyphOutline` can't offset
 a glyph by a fraction of a pixel, so glyphs sit on whole pixels, the same as Nuklear's GDI backend.
 The 4 phases come with DirectWrite (step 9).
+
+## Step 3: sleep when idle, redraw only changed tiles (2026-11-22)
+
+The demo (`examples/demo.c`: the step-2 widgets plus 20 lines of text, at pixelhunter's 1540x950)
+was measured with the same tool and method as the Nuklear apps (hidden desktop, 60 s idle,
+600 posted mouse moves):
+
+| App | start to window | idle CPU ms per 60 s | CPU ms per mouse move | peak working set | exe |
+|---|---|---|---|---|---|
+| **GUICy demo** | **52 ms** | **15.6** (0.026 % of a core; one 15.6 ms scheduler tick) | **0.073** | 34.4 MB | 83 KB |
+| pixelhunter (Nuklear GDI), same size | 107 ms | 781 | 7.2 | 122 MB | 674 KB |
+| voxup (Nuklear GDI) | 432 ms | 16 | 14.4 | 119 MB | |
+| bbb_kit (Nuklear GDI+) | 497 ms | 18,891 | 26.1 | 36.5 MB | |
+
+So a mouse move costs about **100 times less** CPU than pixelhunter's at the same window size,
+and about 200 and 360 times less than voxup's and bbb_kit's (their windows are bigger and fuller,
+so those two ratios aren't like for like). Idle is under the 20 ms per 60 s budget.
+
+`gytest tiles` (offscreen, 420x250, 28 tiles), dirty tiles per frame through a scripted sequence:
+28 (first frame), **0** (nothing changed), **4** (hover over a button), 4, 4, 4, 5, 9, 8, 12.
+Every frame equals a full redraw byte for byte.
+
+How: `gy_frame` blocks in `MsgWaitForMultipleObjectsEx` with no timeout unless `gy_animate` asked
+for one. An input event gets two UI passes. Each instance's 48 bytes plus its clip are hashed into
+the 64x64 tiles it covers. Only tiles whose hash changed are cleared, drawn again (clipped to the
+tile) and `BitBlt`ed to the window.
+
+`guicy.o` is now 42,700 B in all (27,816 B of code).
+
+Not proven yet: "a caret blink costs 2 frames a second". There is no caret until the edit box
+(step 4). `gy_animate` is in, and its proof moves to step 4 with the caret.

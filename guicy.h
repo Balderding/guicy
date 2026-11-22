@@ -18,8 +18,9 @@
        gy_check("Pixel look", &pixel);
        gy_end();                       the frame is drawn
 
-   Status: step 2 of PLAN.md: core, row layout, draw list, CPU renderer (scalar/SSE2/AVX2),
-   GDI glyph atlas; widgets text, button, check, select; disable.
+   Status: step 3 of PLAN.md: core, row layout, draw list, CPU renderer (scalar/SSE2/AVX2),
+   GDI glyph atlas, widgets text/button/check/select/disable, a window that sleeps until input,
+   and 64x64 dirty tiles (only changed tiles are drawn and copied to the screen).
 */
 #ifndef GUICY_H
 #define GUICY_H
@@ -31,7 +32,7 @@
 extern "C" {
 #endif
 
-#define GUICY_VERSION "0.2.0"
+#define GUICY_VERSION "0.3.0"
 
 typedef uint32_t gy_color;                     /* premultiplied 0xAARRGGBB */
 #define GY_RGB(r, g, b) ((gy_color)(0xFF000000u | ((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b)))
@@ -82,6 +83,19 @@ const uint32_t *gy_pixels(void);              /* the frame, w*h, rows top to bot
 int  gy_shot(const char *path);               /* write the frame as a 32-bit BMP; 1 on success */
 void gy_shutdown(void);
 
+/* --- a window ------------------------------------------------------------------------------------ */
+typedef struct gy_desc {
+    const char *title;                        /* UTF-8 */
+    int w, h;                                 /* the client size at start */
+    int min_w, min_h;                         /* the smallest the window may be dragged to */
+} gy_desc;
+int  gy_open(const gy_desc *d);               /* make the window; 1 on success */
+int  gy_frame(void);                          /* draw the last frame, sleep until something happens,
+                                                 start the next; 0 when the window was closed */
+void gy_animate(int ms);                      /* ask for a frame in ms even with no input */
+void gy_wake(void);                           /* from any thread: run a frame soon */
+void gy_tiles(int on);                        /* 0: redraw every pixel every frame (to test the tiles) */
+
 /* --- input (a window feeds these itself; tests and scripts call them) ------------------------- */
 void gy_input_mouse(int x, int y);
 void gy_input_button(int button, int down);   /* 0 left, 1 right, 2 middle */
@@ -121,6 +135,8 @@ const char *gy_isa_name(void);
 
 typedef struct gy_stats {
     int instances, glyph_misses, fonts, atlas_pages;
+    int tiles, dirty_tiles;                   /* this frame: all tiles, tiles drawn again */
+    int frames, frames_drawn;                 /* since start: frames, frames that changed a pixel */
 } gy_stats;
 gy_stats gy_get_stats(void);
 
@@ -283,6 +299,20 @@ typedef struct gy__ctx {
     int npages, shelf_x, shelf_y, shelf_h;
     unsigned char *scratch;                    /* GetGlyphOutline output */
     int glyph_misses;
+
+    /* dirty tiles: 64 x 64, each with the hash of what is drawn on it */
+    int tiles_off, tiles_x, tiles_y, want_full;
+    uint64_t *tile_prev, *tile_cur;
+    unsigned char *tile_dirty;
+    int dirty_tiles, frames, frames_drawn;
+
+    /* the window */
+    HWND hwnd;
+    HBITMAP dib;
+    HDC memdc;
+    int closed, passes, in_frame, resize_w, resize_h, min_w, min_h, tracking;
+    DWORD anim_at;
+    int anim_on;
 
     /* kernels */
     int isa;
@@ -521,6 +551,7 @@ int gy_offscreen(int w, int h) {
     gy__c.px = (uint32_t *)gy__arena_push(&gy__c.perm, (size_t)w * (size_t)h * 4);
     if (!gy__c.px) { gy__set_error("gy_offscreen", "out of memory for the frame"); return 0; }
     gy__c.w = w; gy__c.h = h;
+    gy__c.want_full = 1;
     gy_clear();
     return 1;
 }
@@ -540,6 +571,7 @@ const char *gy_last_error(void) { return gy__c.error; }
 gy_stats gy_get_stats(void) {
     gy_stats s;
     s.instances = gy__c.ninst; s.glyph_misses = gy__c.glyph_misses; s.fonts = gy__c.nfonts; s.atlas_pages = gy__c.npages;
+    s.tiles = gy__c.tiles_x * gy__c.tiles_y; s.dirty_tiles = gy__c.dirty_tiles; s.frames = gy__c.frames; s.frames_drawn = gy__c.frames_drawn;
     return s;
 }
 
@@ -891,6 +923,7 @@ void gy_begin(void) {
     gy__c.ncols = 1; gy__c.col = 0; gy__c.widths[0] = -1;
     gy__row_layout();
     gy__c.id_depth = 0; gy__c.disabled = 0; gy__c.font = 0;
+    gy__c.in_frame = 1;
 }
 
 static void gy__text_v(gy_color col, const char *fmt, va_list ap) {
@@ -1011,19 +1044,255 @@ static void gy__draw_glyph_cpu(const gy__inst *in, gy_rect clip) {
                       page + (size_t)(in->v + y - in->y0) * GY__ATLAS + in->u + (x0 - in->x0), x1 - x0, in->col0);
 }
 
-void gy_end(void) {
+/* --- dirty tiles ---------------------------------------------------------------------------------
+   Every instance's 48 bytes (and its clip) are hashed into each 64x64 tile it touches, in order.
+   A tile whose hash equals last frame's already shows the right pixels and is not touched. A
+   changed tile is cleared and every instance over it is drawn again, clipped to the tile, so the
+   result is byte for byte what a full redraw gives (gytest checks that). */
+#define GY__TILE 64
+#define GY__MAX_TILES ((16384 / GY__TILE) * (16384 / GY__TILE))
+
+static uint64_t gy__mix(uint64_t h, uint64_t v) { h ^= v; h *= 0x9E3779B97F4A7C15ull; return h ^ (h >> 29); }
+
+static uint64_t gy__inst_hash(const gy__inst *in, gy_rect clip) {
+    const uint64_t *q = (const uint64_t *)(const void *)in;
+    uint64_t h = 0x51ED27D3A9C47B1Full;
     int i;
-    if (!gy__c.ready || !gy__c.px) return;
-    gy_clear();
+    for (i = 0; i < 6; i++) h = gy__mix(h, q[i]);
+    return gy__mix(h, (uint64_t)(uint32_t)clip.x << 48 ^ (uint64_t)(uint32_t)clip.y << 32 ^ (uint64_t)(uint32_t)clip.w << 16 ^ (uint32_t)clip.h);
+}
+
+static int gy__tiles_ready(void) {
+    if (gy__c.tile_prev) return 1;
+    gy__c.tile_prev = (uint64_t *)gy__arena_push(&gy__c.perm, sizeof(uint64_t) * GY__MAX_TILES);
+    gy__c.tile_cur = (uint64_t *)gy__arena_push(&gy__c.perm, sizeof(uint64_t) * GY__MAX_TILES);
+    gy__c.tile_dirty = (unsigned char *)gy__arena_push(&gy__c.perm, GY__MAX_TILES);
+    if (!gy__c.tile_prev || !gy__c.tile_cur || !gy__c.tile_dirty) { gy__set_error("GUICy ran out of memory for tiles", NULL); gy__c.tile_prev = NULL; return 0; }
+    return 1;
+}
+
+/* the instance's box on screen, inside its clip and the frame; 0 if nothing shows */
+static int gy__inst_box(const gy__inst *in, gy_rect clip, int *x0, int *y0, int *x1, int *y1) {
+    *x0 = gy__maxi(gy__maxi(in->x0, clip.x), 0); *y0 = gy__maxi(gy__maxi(in->y0, clip.y), 0);
+    *x1 = gy__mini(gy__mini(in->x1, clip.x + clip.w), gy__c.w); *y1 = gy__mini(gy__mini(in->y1, clip.y + clip.h), gy__c.h);
+    return *x1 > *x0 && *y1 > *y0;
+}
+
+static gy_rect gy__isect(gy_rect a, gy_rect b) {
+    gy_rect r;
+    r.x = gy__maxi(a.x, b.x); r.y = gy__maxi(a.y, b.y);
+    r.w = gy__mini(a.x + a.w, b.x + b.w) - r.x; r.h = gy__mini(a.y + a.h, b.y + b.h) - r.y;
+    if (r.w < 0) r.w = 0;
+    if (r.h < 0) r.h = 0;
+    return r;
+}
+
+static void gy__draw_inst(const gy__inst *in, gy_rect clip) {
+    if (in->kind == GY__K_BOX) gy__draw_box_cpu(in, clip);
+    else if (in->kind == GY__K_GLYPH) gy__draw_glyph_cpu(in, clip);
+}
+
+static void gy__render(void) {
+    int i, t, tx, ty, nt, x0, y0, x1, y1, full;
+    uint64_t seed;
+    gy__c.tiles_x = (gy__c.w + GY__TILE - 1) / GY__TILE;
+    gy__c.tiles_y = (gy__c.h + GY__TILE - 1) / GY__TILE;
+    nt = gy__c.tiles_x * gy__c.tiles_y;
+    full = !gy__tiles_ready() || gy__c.tiles_off || gy__c.want_full;   /* (tiles_ready first: it sets up the tables) */
+    if (full) {                                /* everything, the plain way */
+        gy_clear();
+        for (i = 0; i < gy__c.ninst; i++) gy__draw_inst(&gy__c.inst[i], gy__c.clips[gy__c.inst[i].clip]);
+        gy__c.dirty_tiles = nt;
+        if (gy__c.tile_prev) gy__c.want_full = 0;   /* the next frame can compare */
+    }
+    if (!gy__c.tile_prev) return;
+    seed = gy__mix(0xC0FFEEull, gy__c.theme.bg);
+    for (t = 0; t < nt; t++) gy__c.tile_cur[t] = seed;
     for (i = 0; i < gy__c.ninst; i++) {
         const gy__inst *in = &gy__c.inst[i];
         gy_rect clip = gy__c.clips[in->clip];
-        if (in->kind == GY__K_BOX) gy__draw_box_cpu(in, clip);
-        else if (in->kind == GY__K_GLYPH) gy__draw_glyph_cpu(in, clip);
+        uint64_t h;
+        if (!gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
+        h = gy__inst_hash(in, clip);
+        for (ty = y0 / GY__TILE; ty <= (y1 - 1) / GY__TILE; ty++)
+            for (tx = x0 / GY__TILE; tx <= (x1 - 1) / GY__TILE; tx++) {
+                t = ty * gy__c.tiles_x + tx;
+                gy__c.tile_cur[t] = gy__mix(gy__c.tile_cur[t], h);
+            }
     }
+    if (!full) {
+        gy__c.dirty_tiles = 0;
+        for (t = 0; t < nt; t++) {
+            gy__c.tile_dirty[t] = gy__c.tile_cur[t] != gy__c.tile_prev[t];
+            if (gy__c.tile_dirty[t]) {         /* clear the changed tile to the background */
+                int yy, ax = (t % gy__c.tiles_x) * GY__TILE, ay = (t / gy__c.tiles_x) * GY__TILE;
+                int aw = gy__mini(GY__TILE, gy__c.w - ax), ah = gy__mini(GY__TILE, gy__c.h - ay);
+                for (yy = ay; yy < ay + ah; yy++) gy__c.k_fill(gy__c.px + (size_t)yy * gy__c.w + ax, aw, gy__c.theme.bg);
+                gy__c.dirty_tiles++;
+            }
+        }
+        if (gy__c.dirty_tiles)
+            for (i = 0; i < gy__c.ninst; i++) {
+                const gy__inst *in = &gy__c.inst[i];
+                gy_rect clip = gy__c.clips[in->clip], tr;
+                if (!gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
+                for (ty = y0 / GY__TILE; ty <= (y1 - 1) / GY__TILE; ty++)
+                    for (tx = x0 / GY__TILE; tx <= (x1 - 1) / GY__TILE; tx++) {
+                        if (!gy__c.tile_dirty[ty * gy__c.tiles_x + tx]) continue;
+                        tr.x = tx * GY__TILE; tr.y = ty * GY__TILE; tr.w = GY__TILE; tr.h = GY__TILE;
+                        gy__draw_inst(in, gy__isect(clip, tr));
+                    }
+            }
+    } else for (t = 0; t < nt; t++) gy__c.tile_dirty[t] = 1;
+    for (t = 0; t < nt; t++) gy__c.tile_prev[t] = gy__c.tile_cur[t];
+}
+
+void gy_tiles(int on) { gy__c.tiles_off = !on; gy__c.want_full = 1; }
+
+static void gy__present(void);
+
+void gy_end(void) {
+    if (!gy__c.ready || !gy__c.px) return;
+    gy__c.in_frame = 0;
+    gy__render();
+    gy__c.frames++;
+    if (gy__c.dirty_tiles) { gy__c.frames_drawn++; if (gy__c.hwnd) gy__present(); }
     if (gy__c.released[0]) gy__c.active = 0;
     gy__memset(gy__c.pressed, 0, sizeof gy__c.pressed);
     gy__memset(gy__c.released, 0, sizeof gy__c.released);
+}
+
+/* ================================================================================================
+   The window: a DIB section is the frame; dirty tiles are copied to the screen with BitBlt
+   ================================================================================================ */
+
+static void gy__present(void) {
+    HDC wdc = GetDC(gy__c.hwnd);
+    int ty, tx;
+    if (!wdc) return;
+    for (ty = 0; ty < gy__c.tiles_y; ty++)
+        for (tx = 0; tx < gy__c.tiles_x; tx++) {
+            int run;
+            if (!gy__c.tile_dirty[ty * gy__c.tiles_x + tx]) continue;
+            for (run = tx; run + 1 < gy__c.tiles_x && gy__c.tile_dirty[ty * gy__c.tiles_x + run + 1]; run++) {}
+            BitBlt(wdc, tx * GY__TILE, ty * GY__TILE, gy__mini((run + 1) * GY__TILE, gy__c.w) - tx * GY__TILE,
+                   gy__mini(GY__TILE, gy__c.h - ty * GY__TILE), gy__c.memdc, tx * GY__TILE, ty * GY__TILE, SRCCOPY);
+            tx = run;
+        }
+    ReleaseDC(gy__c.hwnd, wdc);
+}
+
+static int gy__dib(int w, int h) {
+    BITMAPINFO bi;
+    void *bits = NULL;
+    HBITMAP nb;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    gy__memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;  /* top-down, like the frame */
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    nb = CreateDIBSection(gy__c.memdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!nb) { gy__set_error("GUICy could not make the window's frame", "CreateDIBSection failed"); return 0; }
+    SelectObject(gy__c.memdc, nb);
+    if (gy__c.dib) DeleteObject(gy__c.dib);
+    gy__c.dib = nb; gy__c.px = (uint32_t *)bits; gy__c.w = w; gy__c.h = h;
+    gy__c.want_full = 1;
+    return 1;
+}
+
+static LRESULT CALLBACK gy__wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (!gy__c.tracking) {
+            TRACKMOUSEEVENT te;
+            te.cbSize = sizeof te; te.dwFlags = TME_LEAVE; te.hwndTrack = hw; te.dwHoverTime = 0;
+            gy__c.tracking = TrackMouseEvent(&te);
+        }
+        gy_input_mouse((short)LOWORD(lp), (short)HIWORD(lp)); gy__c.passes = 2; return 0;
+    case WM_MOUSELEAVE: gy__c.tracking = 0; gy_input_mouse(-32768, -32768); gy__c.passes = 2; return 0;
+    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+        SetCapture(hw);
+        gy_input_button(msg == WM_LBUTTONDOWN ? 0 : msg == WM_RBUTTONDOWN ? 1 : 2, 1); gy__c.passes = 2; return 0;
+    case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+        ReleaseCapture();
+        gy_input_button(msg == WM_LBUTTONUP ? 0 : msg == WM_RBUTTONUP ? 1 : 2, 0); gy__c.passes = 2; return 0;
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) { gy__c.resize_w = LOWORD(lp); gy__c.resize_h = HIWORD(lp); gy__c.passes = 2; }
+        return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *mm = (MINMAXINFO *)lp;
+        RECT r = { 0, 0, gy__c.min_w, gy__c.min_h };
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        if (gy__c.min_w) { mm->ptMinTrackSize.x = r.right - r.left; mm->ptMinTrackSize.y = r.bottom - r.top; }
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;              /* the frame covers everything */
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hw, &ps);
+        if (gy__c.memdc) BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
+                                ps.rcPaint.bottom - ps.rcPaint.top, gy__c.memdc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        EndPaint(hw, &ps);
+        return 0;
+    }
+    case WM_CLOSE: gy__c.closed = 1; return 0;
+    case WM_APP + 1: gy__c.passes = gy__maxi(gy__c.passes, 1); return 0;   /* gy_wake */
+    }
+    return DefWindowProcW(hw, msg, wp, lp);
+}
+
+int gy_open(const gy_desc *d) {
+    WNDCLASSEXW wc;
+    WCHAR title[256];
+    RECT r;
+    if (!gy__init()) return 0;
+    gy__memset(&wc, 0, sizeof wc);
+    wc.cbSize = sizeof wc; wc.lpfnWndProc = gy__wndproc; wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW); wc.lpszClassName = L"GUICy";
+    wc.style = CS_DBLCLKS;
+    RegisterClassExW(&wc);
+    if (!MultiByteToWideChar(CP_UTF8, 0, d->title ? d->title : "GUICy", -1, title, 256)) title[0] = 0;
+    gy__c.min_w = d->min_w; gy__c.min_h = d->min_h;
+    r.left = 0; r.top = 0; r.right = d->w > 0 ? d->w : 900; r.bottom = d->h > 0 ? d->h : 600;
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    gy__c.memdc = CreateCompatibleDC(NULL);
+    if (!gy__c.memdc || !gy__dib(d->w > 0 ? d->w : 900, d->h > 0 ? d->h : 600)) return 0;
+    gy__c.hwnd = CreateWindowExW(0, L"GUICy", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                 r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+    if (!gy__c.hwnd) { gy__set_error("GUICy could not make its window", "CreateWindowExW failed"); return 0; }
+    ShowWindow(gy__c.hwnd, SW_SHOWDEFAULT);
+    gy__c.passes = 2;
+    return 1;
+}
+
+void gy_animate(int ms) {
+    DWORD at = GetTickCount() + (DWORD)(ms < 0 ? 0 : ms);
+    if (!gy__c.anim_on || (int)(at - gy__c.anim_at) < 0) { gy__c.anim_at = at; gy__c.anim_on = 1; }
+}
+
+void gy_wake(void) { if (gy__c.hwnd) PostMessageW(gy__c.hwnd, WM_APP + 1, 0, 0); }
+
+int gy_frame(void) {
+    MSG m;
+    if (!gy__c.hwnd) return 0;
+    if (gy__c.in_frame) gy_end();
+    for (;;) {                                 /* sleep until there is something to do */
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_QUIT) gy__c.closed = 1;
+            TranslateMessage(&m); DispatchMessageW(&m);
+        }
+        if (gy__c.closed) return 0;
+        if (gy__c.anim_on && (int)(GetTickCount() - gy__c.anim_at) >= 0) { gy__c.anim_on = 0; gy__c.passes = gy__maxi(gy__c.passes, 1); }
+        if (gy__c.passes > 0) break;
+        MsgWaitForMultipleObjectsEx(0, NULL, gy__c.anim_on ? gy__maxi(0, (int)(gy__c.anim_at - GetTickCount())) : INFINITE,
+                                    QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
+    gy__c.passes--;                            /* an input event gets two passes: the second settles */
+    if (gy__c.resize_w && (gy__c.resize_w != gy__c.w || gy__c.resize_h != gy__c.h)) gy__dib(gy__c.resize_w, gy__c.resize_h);
+    gy__c.resize_w = gy__c.resize_h = 0;
+    gy_begin();
+    return 1;
 }
 
 /* ================================================================================================
@@ -1062,6 +1331,9 @@ void gy_shutdown(void) {
     int i;
     for (i = 0; i < gy__c.nfonts; i++) if (gy__c.fonts[i].hf) DeleteObject(gy__c.fonts[i].hf);
     if (gy__c.dc) DeleteDC(gy__c.dc);
+    if (gy__c.hwnd) DestroyWindow(gy__c.hwnd);
+    if (gy__c.dib) DeleteObject(gy__c.dib);
+    if (gy__c.memdc) DeleteDC(gy__c.memdc);
     if (gy__c.perm.base) VirtualFree(gy__c.perm.base, 0, MEM_RELEASE);
     if (gy__c.frame.base) VirtualFree(gy__c.frame.base, 0, MEM_RELEASE);
     gy__memset(&gy__c, 0, sizeof gy__c);

@@ -29,7 +29,7 @@ static int s_check_a = 0, s_check_b = 1, s_sel = 1;
 static void scene(void) {
     static const float two[2] = { 0.5f, -1 }, three[3] = { 110, 110, -1 };
     gy_begin();
-    gy_text("GUICy %s: widgets, step %d", GUICY_VERSION, 2);
+    gy_text("GUICy: widgets, step %d", 2);
     gy_row(3, three);
     if (gy_button("Build")) strcat(g_log, "Build clicked; ");
     gy_button("Stop##1");
@@ -92,6 +92,41 @@ static int t_click_check(void) {
     return 1;
 }
 
+/* dirty tiles: the same frames with tiles on and off must be equal at every frame, an unchanged
+   frame draws no tile, and a hover over one button draws at most 4 tiles */
+static uint64_t frame_hash(void);
+static int run_tiles(int on, uint64_t *hs, int *dirty) {
+    static const int path[][3] = { { -100, -100, 0 }, { -100, -100, 0 }, { 60, 56, 0 }, { 60, 56, 1 }, { 60, 56, 0 },
+                                   { 40, 90, 1 }, { 40, 90, 0 }, { 300, 124, 1 }, { 300, 124, 0 }, { -100, -100, 0 } };
+    int i;
+    s_check_a = 0; s_check_b = 1; s_sel = 1;
+    if (!frame_open(420, 250)) return 0;
+    gy_tiles(on);
+    for (i = 0; i < 10; i++) {
+        gy_input_mouse(path[i][0], path[i][1]);
+        gy_input_button(0, path[i][2]);
+        scene();
+        hs[i] = frame_hash();
+        dirty[i] = gy_get_stats().dirty_tiles;
+    }
+    return 1;
+}
+static int t_tiles(void) {
+    uint64_t on[10], off[10];
+    int don[10], doff[10], i;
+    char b[160];
+    if (!run_tiles(0, off, doff)) return 0;
+    gy_shutdown();
+    if (!run_tiles(1, on, don)) return 0;
+    for (i = 0; i < 10; i++) if (on[i] != off[i]) { sprintf(b, "frame %d differs from a full redraw; ", i); strcat(g_log, b); return 0; }
+    sprintf(b, "dirty tiles per frame (of %d): %d %d %d %d %d %d %d %d %d %d; ", gy_get_stats().tiles,
+            don[0], don[1], don[2], don[3], don[4], don[5], don[6], don[7], don[8], don[9]);
+    strcat(g_log, b);
+    if (don[1] != 0) { strcat(g_log, "an unchanged frame drew tiles; "); return 0; }
+    if (don[2] > 4) { strcat(g_log, "a hover drew more than 4 tiles; "); return 0; }
+    return 1;
+}
+
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "blank", t_blank },
@@ -102,6 +137,7 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "select_hot", t_select_hot },
     { "disabled_hot", t_disabled_hot },
     { "click_check", t_click_check },
+    { "tiles", t_tiles },
 };
 #define NTESTS ((int)(sizeof TESTS / sizeof TESTS[0]))
 
@@ -139,6 +175,8 @@ static void save_hashes(const char *path) {
     for (i = 0; i < g_nh; i++) fprintf(f, "%s %016llx\n", g_names[i], (unsigned long long)g_hash[i]);
     fclose(f);
 }
+
+static uint64_t frame_hash(void) { return fnv64(gy_pixels(), gy_width() * gy_height(), gy_width(), gy_height()); }
 
 int main(int argc, char **argv) {
     char out[MAX_PATH], hashes[MAX_PATH], *s;
