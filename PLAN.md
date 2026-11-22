@@ -11,8 +11,8 @@ GUICy is an immediate-mode GUI library in plain C. You call `gy_button("Save")` 
 it returns 1 on the frame it was clicked. There are no widget objects and no callbacks, and the
 state lives in the app's own variables.
 
-- **Who uses it first:** three Windows tools of the user's: bbb_kit (O:\bases), pixelhunter
-  (O:\pixelarthunter) and voxup (O:\voxup). Later, any C program that wants a window with
+- **Who uses it first:** three Windows tools of the user's: bbb_kit (X:\bases), pixelhunter
+  (X:\pixelhunter) and voxup (X:\voxup). Later, any C program that wants a window with
   controls in it.
 - **What it replaces:** Nuklear with its GDI and GDI+ backends. Those apps use about 70 Nuklear
   calls plus their own helpers (nk_ext_row, nk_ext_wrap_label, nk_ext_splitter, nk_ext_tooltip,
@@ -301,14 +301,14 @@ drag and drop between widgets.
 ## 5. Steps
 
 Each step ends with one local commit and "done: <commit> <what>" to Master Control. All runs are
-hidden (offscreen, no focus), one at a time, and temporary files go in O:\code.projects\guicy\work.
+hidden (offscreen, no focus), one at a time, and temporary files go in X:\guicy\work.
 "Pictures" means BMPs from the app's own `--selftest` or `gytest`, compared with a pixel diff tool
 that reports changed-pixel count and max channel difference.
 
 | # | Deliverable | Proof |
 |---|---|---|
 | 0 | **Baseline of the three Nuklear apps.** A small timing hook (local branch, not committed to the apps' main) logging UI-pass and render ms per frame; the selftest pictures saved as references in work\baseline. | A table in BENCH.md per app: exe KB, startup to first frame ms, median and 95th-percentile frame ms (idle, hover, scroll, full resize), idle CPU % over 60 s (process CPU time delta), working set MB, and Nuklear's share of the exe KB. Reference pictures for each selftest scene. |
-| 1 | **Skeleton:** guicy.h layout, build.cmd (clang, `-Wall -Wextra -Werror`), `gytest` host, offscreen target, `gy_shot`, the dwrite.h and fxc probes (section 7). | Builds clean; `gytest` imports only OS DLLs (read from the import table); an empty GUICy exe size in BENCH.md; a blank offscreen BMP matches its golden byte for byte. |
+| 1 | **Skeleton:** guicy.h layout, build.cmd (clang, `-Wall -Wextra -Werror`), `gytest` host, offscreen target, `gy_shot`, the dwrite.h probe (section 7). | Builds clean; `gytest` imports only OS DLLs (read from the import table); an empty GUICy exe size in BENCH.md; a blank offscreen BMP matches its golden byte for byte. |
 | 2 | **Core plus CPU renderer:** context, IDs, input, row layout, draw list, theme, FILL/FILL_COV/GLYPH kernels (SSE2 and AVX2), GDI glyph atlas; widgets text, button, check, select. | Golden pictures for each widget in each state (normal, hover, active, disabled) match byte for byte between runs; SSE2 and AVX2 pictures are identical; a scripted click test toggles the check and the log shows it. |
 | 3 | **Idle loop and dirty tiles.** | Idle CPU 0.0% over 60 s (CPU time delta under 20 ms); a hover over one button re-rasterizes at most 4 tiles; a caret blink costs 2 frames a second; frame-hash numbers in BENCH.md. |
 | 4 | **The rest of v1:** slider, number, combo, edit, scroll, tree, progress, tooltip, images (nearest and bilinear), disable, colour push/pop, fonts, theme table, split, grid, canvas calls, layers, tiling (3.12). | Golden pictures per widget; scripted tests for drag (slider, split), typing and undo (edit), wheel (scroll, number), double-click reset (split), the tooltip delay, `gy_button_key`; tiling: open, close, swap, flip, zoom, stack-as-tabs and the key moves, each with a golden picture, plus the saved tree restoring the same picture after a restart. |
@@ -345,15 +345,18 @@ a budget either fixes it or reports why before moving on.
 ## 7. Risks and open questions
 
 1. **MinGW `dwrite.h` (from cpu.md).** Answered by reading the header: the sysroot's
-   `O:\appsnotonc\gcc\mingw64\x86_64-w64-mingw32\include\dwrite.h` is widl-made and has the C
+   `X:\tools\gcc\mingw64\x86_64-w64-mingw32\include\dwrite.h` is widl-made and has the C
    vtables (`IDWriteFactoryVtbl`, `IDWriteGlyphRunAnalysisVtbl`, about 670 Vtbl lines). Still to
    confirm in step 1 with a 20-line probe that compiles in C and resolves `DWriteCreateFactory`
    through `LoadLibrary("dwrite.dll")`. Fallback: declare the 8 methods we use ourselves.
-2. **fxc lives in the Windows SDK on C:** (`Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe`). Using it
-   installs nothing, but the shader headers are checked in so builds never need it. Open: is the
-   user fine with that one tool call on C:?
-3. **ASR rule 01443614 blocks new exes** in some folders. `gytest` and `gybench` must be built where
-   Defender allows (see gpo-audit), or the step stalls. Decide the folder in step 1.
+2. **Shader compiling without fxc.** fxc lives only in the Windows SDK on C:, and X:	ools\dxc only makes
+   DXIL (D3D12), not the DXBC that D3D11 needs. But Windows itself ships
+   `C:\Windows\System32\d3dcompiler_47.dll` (checked 2026-11-22). A ~40-line build tool `gyshader`
+   loads it with LoadLibrary, calls D3DCompile and writes the bytecode headers. That uses an OS DLL
+   and installs nothing. The headers are checked in, so normal builds never need it. Open: the
+   user still confirms whether reading that OS DLL at build time is fine (Master Control asks).
+3. **ASR:** X:\ is ASR-excluded since the move (2026-11-22), so `gytest` and `gybench` build and run in
+   X:\guicyuild.
 4. **Picture diffs versus Nuklear will not be zero.** Font rasterizing, AA and rounding differ. The
    sign-off is the user's eye on side-by-side pictures, with the diff as a guide, not a pass/fail.
 5. **The one-frame input lag** of the deferred layout can show as a flicker on the frame after a
