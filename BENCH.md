@@ -94,3 +94,21 @@ Until then, "CPU ms per mouse move" stands in for the frame cost.
 Found while proving: clang turns GUICy's own byte loop into a `memset` call, which would call
 itself forever without the CRT. `__attribute__((no_builtin("memset")))` on the helpers stops it,
 and `llvm-nm -u` now lists only the five kernel32 functions.
+
+## Step 2: core, CPU renderer, first widgets (2026-11-22)
+
+| Thing | Number |
+|---|---|
+| `guicy.o` (-O2): text / data / bss | 22,216 / 3,396 / 10,848 = **36,460 B** (Nuklear + GDI backend: about 255,000 B) |
+| What `guicy.o` needs from outside | kernel32: `CloseHandle CreateFileA GetEnvironmentVariableA VirtualAlloc VirtualFree WriteFile`; gdi32: `CreateCompatibleDC CreateFontW DeleteDC DeleteObject GetGlyphOutlineW GetTextMetricsW SelectObject`. No C library. |
+| Tests | 8 of 8 pass, each drawn with the **scalar, SSE2 and AVX2 kernels, all three byte-identical**, and equal to its golden hash. Also passes with `GUICY_USE_CRT`. |
+| Scripted input | `click_check`: move, press, release over the check box turns it on; a select click moves the choice; a press on a disabled button does nothing |
+| Draw list entry | 48 bytes (checked at compile time) |
+
+Kernels (all exact-integer, rounded /255): solid fill, row blend (rounded-corner and border rows),
+glyph coverage blend. Rounded corners and borders are worked out per pixel only in the top and
+bottom bands; the rows between reuse one precomputed row.
+
+Deviation from PLAN 3.8: there are no subpixel x phases yet. GDI's `GetGlyphOutline` can't offset
+a glyph by a fraction of a pixel, so glyphs sit on whole pixels, the same as Nuklear's GDI backend.
+The 4 phases come with DirectWrite (step 9).

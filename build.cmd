@@ -16,6 +16,6 @@ set D=
 if /i "%1"=="crt" set D=-DGUICY_USE_CRT
 rem the library alone, so its imports and size can be read
 clang %CLANG_FLAGS% %W% %D% -x c -DGUICY_IMPLEMENTATION -c -o build\guicy.o guicy.h || exit /b 1
-clang %CLANG_FLAGS% %W% %D% -static -o build\gytest.exe tests\gytest.c || exit /b 1
+clang %CLANG_FLAGS% %W% %D% -static -o build\gytest.exe tests\gytest.c -lgdi32 || exit /b 1
 clang %CLANG_FLAGS% %W% -static -o build\probe_dwrite.exe tests\probe_dwrite.c || exit /b 1
 echo built build\gytest.exe build\probe_dwrite.exe build\guicy.o
