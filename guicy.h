@@ -238,6 +238,15 @@ int gy_test_texts(const gy_test_text **out);  /* the last frame's texts, in draw
 gy_color gy_test_text_bg(int i);              /* the opaque colour under text i (the box drawn under it) */
 #endif
 
+/* --- scale: everything is in DIPs; pixels = DIPs x monitor factor x zoom x font ratio ----------- */
+enum { GY_SCALE_DPI_AND_RESOLUTION, GY_SCALE_DPI_ONLY, GY_SCALE_FIXED };
+void  gy_scale_mode(int mode);               /* how the monitor factor is chosen (the default: DPI and resolution) */
+void  gy_scale_set(float f);                 /* GY_SCALE_FIXED: the app's own factor (also the off-screen one) */
+float gy_scale(void);                        /* device pixels per DIP now */
+void  gy_font_size(int px);                  /* the user's font size in DIPs (0: the theme's); the whole UI follows it */
+void  gy_zoom_set(float z);                  /* 0.75 .. 3.0; Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+wheel step it */
+float gy_zoom(void);
+
 /* --- fonts, theme, kernels, stats, errors ------------------------------------------------------ */
 int  gy_font_add(const char *face, int px, int bold);   /* returns its index; 0 is the theme's font */
 void gy_font(int i);                                  /* text from here on uses font i */
@@ -389,6 +398,8 @@ typedef struct gy__glyph {
 
 typedef struct gy__font {
     HFONT hf;
+    WCHAR face[64];
+    int dip, bold;                             /* as asked for: the size in DIPs (0: the theme font, which follows the font size) */
     int px, ascent, descent, height;
     int ascii[128];                            /* glyph slot + 1 for codepoints < 128, 0 = not yet */
 } gy__font;
@@ -470,6 +481,8 @@ typedef struct gy__ctx {
     gy_theme theme;
     gy__sizes rs;                              /* the theme's sizes, resolved (GY__S) */
     float scale;                               /* device pixels per DIP: monitor x zoom x font ratio */
+    float mon_factor, scale_fixed, zoom;       /* the three terms (mon_factor: the window's monitor) */
+    int scale_mode, user_font;
     char error[512];
     char banner[256];
 
@@ -826,6 +839,7 @@ const char *gy_isa_name(void) {
    ================================================================================================ */
 
 static int gy__font_make(const char *face, int px, int bold);
+static void gy__scale_apply(void);
 static void gy__tile_keys_default(void);
 
 static int gy__ncorners, gy__corner_off;       /* the corner cache (below), whose pages live in the arena */
@@ -852,7 +866,7 @@ static int gy__init(void) {
     gy__c.troot = gy__c.tfocus = gy__c.tzoom = gy__c.tdrag = -1;
     gy__tile_keys_default();
     gy__c.ready = 1;
-    gy__c.scale = 1;
+    gy__c.scale = 1; gy__c.mon_factor = 1; gy__c.scale_fixed = 1; gy__c.zoom = 1;
     gy__resolve();
     if (gy__font_make("Segoe UI", gy__c.theme.font_px, 0) < 0) return 0;
     return 1;
@@ -885,7 +899,12 @@ int gy_width(void) { return gy__c.w; }
 int gy_height(void) { return gy__c.h; }
 const uint32_t *gy_pixels(void) { return gy__c.px; }
 const gy_theme *gy_theme_get(void) { gy__init(); return &gy__c.theme; }
-void gy_theme_set(const gy_theme *t) { if (gy__init()) { gy__c.theme = *t; gy__resolve(); gy__c.want_full = 1; } }
+void gy_theme_set(const gy_theme *t) {
+    if (!gy__init()) return;
+    gy__c.theme = *t;
+    gy__c.scale = -1;                          /* sizes and fonts are made again even at the same scale */
+    gy__scale_apply();
+}
 const char *gy_last_error(void) { return gy__c.error; }
 void gy_error(const char *text) { gy__strcpy(gy__c.banner, text ? text : "", sizeof gy__c.banner); }
 
@@ -1031,23 +1050,58 @@ static void gy__dash(float x0, float y0, float x1, float y1, float width, float 
    Text: GDI glyphs cached in coverage pages
    ================================================================================================ */
 
-static int gy__font_make(const char *face, int px, int bold) {
-    WCHAR wface[64];
+/* (re)make font f at the current scale: the theme font at the resolved font size, others at dip x scale */
+static int gy__font_build(gy__font *f) {
     TEXTMETRICW tm;
-    gy__font *f;
-    if (gy__c.nfonts >= GY__MAX_FONTS) { gy__set_error("gy_font_add", "16 fonts at most"); return -1; }
-    f = &gy__c.fonts[gy__c.nfonts];
-    gy__memset(f, 0, sizeof *f);
-    if (!MultiByteToWideChar(CP_UTF8, 0, face, -1, wface, 64)) wface[0] = 0;
-    f->hf = CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, wface);
-    if (!f->hf) { gy__set_error("gy_font_add could not make the font", face); return -1; }
+    float v = (float)f->dip * gy__c.scale + 0.5f;
+    int px = f->dip ? (int)v : gy__c.rs.font_px;
+    HFONT hf = CreateFontW(-px, 0, 0, 0, f->bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, f->face);
+    if (!hf) return 0;
+    if (f->hf) DeleteObject(f->hf);
+    f->hf = hf;
     SelectObject(gy__c.dc, f->hf);
     gy__c.dc_font = f->hf;
     gy__os.text_metrics(gy__c.dc, &tm);
     f->px = px; f->ascent = tm.tmAscent; f->descent = tm.tmDescent; f->height = tm.tmHeight;
+    gy__memset(f->ascii, 0, sizeof f->ascii);
+    return 1;
+}
+
+static int gy__font_make(const char *face, int dip, int bold) {
+    gy__font *f;
+    if (gy__c.nfonts >= GY__MAX_FONTS) { gy__set_error("gy_font_add", "16 fonts at most"); return -1; }
+    f = &gy__c.fonts[gy__c.nfonts];
+    gy__memset(f, 0, sizeof *f);
+    if (!MultiByteToWideChar(CP_UTF8, 0, face, -1, f->face, 64)) f->face[0] = 0;
+    f->dip = gy__c.nfonts ? dip : 0;           /* font 0 is the theme font: it follows gy_font_size */
+    f->bold = bold;
+    if (!gy__font_build(f)) { gy__set_error("gy_font_add could not make the font", face); return -1; }
     return gy__c.nfonts++;
 }
+
+/* a new scale: the theme's sizes, every font and the glyph atlas are made again; the next frame is
+   a full redraw. Pages of the atlas are kept and reused. */
+static void gy__scale_apply(void) {
+    float mon = gy__c.scale_mode == GY_SCALE_FIXED ? gy__c.scale_fixed : gy__c.mon_factor;
+    float fr = gy__c.user_font > 0 ? (float)gy__c.user_font / (float)gy__c.theme.font_px : 1.0f;
+    float ns = (mon > 0 ? mon : 1.0f) * (gy__c.zoom > 0 ? gy__c.zoom : 1.0f) * fr;
+    int i;
+    if (ns == gy__c.scale && gy__c.scale > 0) return;
+    gy__c.scale = ns;
+    gy__resolve();
+    gy__memset(gy__c.glyphs, 0, sizeof(gy__glyph) * GY__GLYPH_SLOTS);
+    gy__c.npages = 0; gy__c.shelf_x = gy__c.shelf_y = gy__c.shelf_h = 0;
+    for (i = 0; i < gy__c.nfonts; i++) gy__font_build(&gy__c.fonts[i]);
+    gy__c.want_full = 1;
+}
+
+void gy_scale_mode(int mode) { if (gy__init()) { gy__c.scale_mode = mode; gy__scale_apply(); } }
+void gy_scale_set(float f) { if (gy__init() && f > 0) { gy__c.scale_fixed = f; gy__c.scale_mode = GY_SCALE_FIXED; gy__scale_apply(); } }
+float gy_scale(void) { return gy__init() ? gy__c.scale : 1.0f; }
+void gy_font_size(int px) { if (gy__init()) { gy__c.user_font = px > 0 ? px : 0; gy__scale_apply(); } }
+void gy_zoom_set(float z) { if (gy__init()) { gy__c.zoom = gy__clampf(z, 0.75f, 3.0f); gy__scale_apply(); } }
+float gy_zoom(void) { return gy__init() ? gy__c.zoom : 1.0f; }
 
 int gy_font_add(const char *face, int px, int bold) { if (!gy__init()) return -1; return gy__font_make(face, px, bold); }
 void gy_font(int i) { if (i >= 0 && i < gy__c.nfonts) gy__c.font = i; }
@@ -1061,7 +1115,8 @@ static int gy__atlas_alloc(int w, int h, int *page, int *u, int *v) {
     }
     if (!gy__c.npages || gy__c.shelf_y + h + 1 > GY__ATLAS) {
         if (gy__c.npages == GY__MAX_PAGES) { gy__set_error("GUICy's glyph atlas is full", "8 pages of 1024x1024"); return 0; }
-        gy__c.pages[gy__c.npages] = (unsigned char *)gy__arena_push(&gy__c.perm, GY__ATLAS * GY__ATLAS);
+        if (!gy__c.pages[gy__c.npages])        /* a page made before a scale change is reused */
+            gy__c.pages[gy__c.npages] = (unsigned char *)gy__arena_push(&gy__c.perm, GY__ATLAS * GY__ATLAS);
         if (!gy__c.pages[gy__c.npages]) { gy__set_error("GUICy ran out of memory for glyphs", NULL); return 0; }
         gy__memset(gy__c.pages[gy__c.npages], 0, GY__ATLAS * GY__ATLAS);
         gy__c.npages++; gy__c.shelf_x = 0; gy__c.shelf_y = 0; gy__c.shelf_h = 0;

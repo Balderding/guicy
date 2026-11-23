@@ -131,6 +131,7 @@ static int t_tiles(void) {
 static HWND g_win_to_destroy;                  /* a test's own app window, closed after gy_shutdown */
 #include "v1_tests.inc"
 #include "h1_tests.inc"
+#include "d1_tests.inc"
 
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
@@ -171,6 +172,12 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "h1_guard", t_h1_guard },
     { "h1_texts", t_h1_texts },
     { "h1_test_font", t_h1_test_font },
+    { "d1_resolved", t_d1_resolved },
+    { "d1_exact", t_d1_exact },
+    { "d1_look_125", t_d1_look_125 },
+    { "d1_look_150", t_d1_look_150 },
+    { "d1_look_200", t_d1_look_200 },
+    { "d1_seams", t_d1_seams },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
 };
