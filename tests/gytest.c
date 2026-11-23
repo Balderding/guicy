@@ -180,6 +180,10 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "d1_seams", t_d1_seams },
     { "d1_zoom", t_d1_zoom },
     { "d1_monitors", t_d1_monitors },
+    { "d1_contrast", t_d1_contrast },
+    { "d1_sheet_100", t_d1_sheet_100 },
+    { "d1_sheet_125", t_d1_sheet_125 },
+    { "d1_sheet_125_portrait", t_d1_sheet_125_portrait },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
     { "w_dpi", t_w_dpi },
@@ -265,6 +269,17 @@ int main(int argc, char **argv) {
     if (windowed && on_default_desktop()) return relaunch_on_test_desktop();
     snprintf(out, sizeof out, "%s\\work", g_root); CreateDirectoryA(out, NULL);
     snprintf(out, sizeof out, "%s\\work\\out", g_root); CreateDirectoryA(out, NULL);
+    if (!named) {                              /* a full run starts with no old pictures, so none can be taken for new ones */
+        WIN32_FIND_DATAA fd;
+        HANDLE fh;
+        char pat[MAX_PATH], one[MAX_PATH];
+        snprintf(pat, sizeof pat, "%s\\work\\out\\%s*.bmp", g_root, windowed ? "w_" : "");
+        fh = FindFirstFileA(pat, &fd);
+        if (fh != INVALID_HANDLE_VALUE) {
+            do { snprintf(one, sizeof one, "%s\\work\\out\\%s", g_root, fd.cFileName); if (windowed || strncmp(fd.cFileName, "w_", 2)) DeleteFileA(one); } while (FindNextFileA(fh, &fd));
+            FindClose(fh);
+        }
+    }
     snprintf(hashes, sizeof hashes, "%s\\tests\\golden\\hashes.txt", g_root);
     load_hashes(hashes);
 

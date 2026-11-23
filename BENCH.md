@@ -336,3 +336,56 @@ win; a tie loses) **the CPU renderer stays the default**. G1 becomes opt-in work
 as PLAN-v2 planned for this outcome, and the visible race (check A) isn't needed. The GPU stays
 worth building for apps that redraw everything every frame (animation, big canvases), where the
 full-redraw row is the one that counts.
+
+## D1: everything scales (PLAN-v2, M1, 2026-11-23)
+
+| Thing | Number |
+|---|---|
+| Tests | **49/49** normal + **3/3** windowed (`w_attach`, `w_open`, `w_dpi`); every golden PNG made again from one clean run |
+| Size | `guicy.o` 97,520 + 9,290 = **106.8 kB**: +9.0 against the +6 budget, 3 kB over |
+| A scale change and its first frame at 1925x1188 (fonts, atlas, full redraw) | **2.5-2.9 ms** (budget 10) |
+| `check_px.py` | **0** unscaled pixel sizes in the widget, layout and tiling code (50 at F1) |
+
+What is in it:
+- **The factor:** monitor factor x zoom x font ratio. The monitor factor is max(DPI/96, the shorter
+  side/1080) in 25 % steps (`d1_monitors`: 4K/96 200 %, 1440p/96 125 %, portrait 1440x2560/96 125 %,
+  1080p/144 150 %, DPI-only 1440p/96 100 %). `GY_SCALE_DPI_ONLY`, `GY_SCALE_FIXED` + `gy_scale_set`.
+- **Sizes in em of the font,** resolved once per scale or font change into whole pixels. At 100 % the
+  resolved theme is exactly today's integers (`d1_resolved`), so every old golden stayed byte-equal
+  through stages A-E. At 125 %: rows 35 px, gaps 8, the font 19 px, lines 1 px.
+- **The API is in DIPs** (`gy_rect` is float); inside everything is whole device pixels (`gy__ir`), so
+  floats never reach the tile hash. Line and border widths are whole pixels (at least 1), and thin
+  axis-aligned canvas lines are snapped to pixels.
+- **Fonts and the glyph atlas** are made again at the new scale; the atlas pages are reused.
+- **Zoom, VS Code style:** Ctrl+= / Ctrl+- (and the numpad) in 10 % steps from 75 % to 300 %, Ctrl+0,
+  Ctrl+wheel. Saved with the font size in one line (`gy_view_save/load`). The keys are clash-checked
+  through `gy_keys_owned` (`d1_zoom`: an app that owns Ctrl+= keeps it, a banner says so, and
+  numpad + still zooms).
+- **Monitors:** per-monitor DPI v2 for `gy_open`, WM_DPICHANGED takes Windows' suggested rect at
+  once, a same-DPI monitor of another size switches once at the end of the move around the window's
+  centre, and the opening size is capped to the work area (`w_dpi`, on its own desktop with stubbed
+  monitors). **The user's case:** both monitors are 125 %, and a move between them changes nothing.
+- **High contrast:** the system's colours while it is on, the app's own back when it goes off, live
+  on WM_SETTINGCHANGE (`d1_contrast`).
+- **Images:** `gy_image` scales nearest by default (pixel art stays sharp at 125 %), and
+  `GY_IMG_DEVICE_PX` draws 1:1. This is the only pixel change at 100 %: the 16 goldens with the
+  test images. A copy built with the old image rule matched every old golden, which proves nothing
+  else moved.
+- **No seams** (`d1_seams`): at 125 % x every zoom step down to 0.75, pixel -> DIP -> pixel is the
+  identity, and a 1-DIP canvas line is exactly 1 px.
+- **Exact scaling** (`d1_exact`, synthetic font): 80 instances at factors 2, 3 and 4, each rect k
+  times the 1x one within the rounding of one halving (k/2 px).
+
+**Before/after on the user's monitors:** `bench/d1_before_after_125.png` (today at 100 %; 125 % on
+DISPLAY2 2560x1440; 125 % on the portrait DISPLAY3, where the 1540 DIP window opens 1440 px wide
+and the layout reflows).
+
+Deviation, said plainly: the plan's "a zoom-in first grows the window up to the work area" is not
+in. Zoom keeps the window's size, as VS Code does. Growing the window matters only for locked
+layouts, so it moves to L1.
+
+Found on the way:
+- The zoom's 10 % rounding ran on every frame, so 75 % came back as 80 %.
+- The golden PNGs for people had gone stale: the hashes were right, but the PNGs were made from
+  left-over pictures. gytest now empties `work\out` at the start of a full run, and every PNG was
+  made again.

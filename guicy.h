@@ -216,7 +216,9 @@ enum { GY_FMT_RGBA, GY_FMT_BGRA, GY_FMT_BGRA_PM };   /* straight RGBA (stb_image
 int  gy_image_make(int w, int h, const void *px, int fmt);   /* returns an image id (> 0), 0 on failure */
 int  gy_image_update(int img, const void *px, int fmt);
 void gy_image_free(int img);
-void gy_image(int img, int w, int h);         /* an image widget */
+void gy_image(int img, int w, int h);         /* an image widget, w x h DIPs, scaled nearest (pixel art stays
+                                                 sharp); GY_IMG_DEVICE_PX for w and h: the image's own pixels, 1:1 */
+#define GY_IMG_DEVICE_PX (-1)
 void gy_canvas_rect(gy_rect r, gy_color fill, float radius);
 void gy_canvas_box(gy_rect r, gy_color fill, gy_color border, float radius, float border_w);
 void gy_canvas_circle(int cx, int cy, int r, gy_color c);
@@ -463,10 +465,11 @@ typedef struct gy__os_t {
     BOOL (WINAPI *text_metrics)(HDC, LPTEXTMETRICW);
     DWORD (WINAPI *ticks)(void);
     BOOL (WINAPI *monitor_info)(HMONITOR, LPMONITORINFO);
+    BOOL (WINAPI *spi)(UINT, UINT, PVOID, UINT);           /* SystemParametersInfoW: high contrast */
     UINT (*monitor_dpi)(HMONITOR);             /* GetDpiForMonitor (shcore, loaded at run time), or 96 */
 } gy__os_t;
 static UINT gy__dpi_of_monitor(HMONITOR m);
-static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, gy__dpi_of_monitor };
+static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, SystemParametersInfoW, gy__dpi_of_monitor };
 
 /* the monitor's DPI through shcore's GetDpiForMonitor when Windows has it (8.1 and later) */
 static UINT gy__dpi_of_monitor(HMONITOR m) {
@@ -497,6 +500,8 @@ typedef struct gy__ctx {
     size_t off_cap;                            /* its size in pixels */
     gy_theme theme;
     gy__sizes rs;                              /* the theme's sizes, resolved (GY__S) */
+    gy_theme app_theme;                        /* the app's colours while high contrast is on */
+    int high_contrast;
     float scale;                               /* device pixels per DIP: monitor x zoom x font ratio */
     float mon_factor, scale_fixed, zoom;       /* the three terms (mon_factor: the window's monitor) */
     int scale_mode, user_font;
@@ -858,6 +863,7 @@ const char *gy_isa_name(void) {
 
 static int gy__font_make(const char *face, int px, int bold);
 static void gy__scale_apply(void);
+static void gy__contrast_check(void);
 static void gy__tile_keys_default(void);
 static void gy__zoom_keys_default(void);
 
@@ -888,6 +894,7 @@ static int gy__init(void) {
     gy__c.ready = 1;
     gy__c.scale = 1; gy__c.mon_factor = 1; gy__c.scale_fixed = 1; gy__c.zoom = 1;
     gy__resolve();
+    gy__contrast_check();
     if (gy__font_make("Segoe UI", gy__c.theme.font_px, 0) < 0) return 0;
     return 1;
 }
@@ -1140,6 +1147,35 @@ static void gy__monitor_update(void) {
     if (!gy__c.hwnd || gy__c.scale_mode == GY_SCALE_FIXED) return;
     f = gy__monitor_factor(MonitorFromWindow(gy__c.hwnd, MONITOR_DEFAULTTONEAREST), NULL);
     if (f != gy__c.mon_factor) { gy__c.mon_factor = f; gy__scale_apply(); gy__c.passes = gy__maxi(gy__c.passes, 2); }
+}
+
+/* high contrast: with Windows' high contrast on, the colours come from the system's, and they switch
+   live (WM_SETTINGCHANGE); the app's own colours come back when it goes off */
+static gy_color gy__sys(int i) { COLORREF c = GetSysColor(i); return GY_RGB(GetRValue(c), GetGValue(c), GetBValue(c)); }
+static void gy__contrast_check(void) {
+    HIGHCONTRASTW hc;
+    int on;
+    gy__memset(&hc, 0, sizeof hc); hc.cbSize = sizeof hc;
+    on = gy__os.spi(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+    if (on == gy__c.high_contrast) return;
+    if (on) {
+        gy_theme *t = &gy__c.theme;
+        gy__c.app_theme = *t;
+        t->bg = t->panel = t->field = t->field_hot = gy__sys(COLOR_WINDOW);
+        t->card = t->button = gy__sys(COLOR_BTNFACE);
+        t->text = t->text_dim = t->heading = t->border = t->divider = t->good = t->warn = t->bad = gy__sys(COLOR_WINDOWTEXT);
+        t->text_off = gy__sys(COLOR_GRAYTEXT);
+        t->button_hot = t->button_down = t->accent = t->accent_hot = t->select = t->divider_hot = gy__sys(COLOR_HIGHLIGHT);
+        t->accent_text = gy__sys(COLOR_HIGHLIGHTTEXT);
+        t->tip = gy__sys(COLOR_INFOBK);
+        t->shadow = 0;
+    } else {
+        gy_theme keep = gy__c.theme, *t = &gy__c.theme;
+        *t = gy__c.app_theme;                  /* the colours back; the sizes as they are now */
+        t->pad = keep.pad; t->gap = keep.gap; t->row_h = keep.row_h; t->radius = keep.radius; t->font_px = keep.font_px;
+    }
+    gy__c.high_contrast = on;
+    gy__c.want_full = 1;
 }
 
 void gy_scale_mode(int mode) { if (gy__init()) { gy__c.scale_mode = mode; gy__monitor_update(); gy__scale_apply(); } }
@@ -2114,11 +2150,12 @@ void gy_image(int img, int w, int h) {
     gy__lay *l = &GY__L;
     gy__ir r;
     if (img <= 0 || img >= GY__IMAGES || !gy__c.img[img].px) { gy__next(); return; }
-    w = gy__px((float)w / (float)gy__c.theme.font_px); h = gy__px((float)h / (float)gy__c.theme.font_px);   /* DIPs */
+    if (w == GY_IMG_DEVICE_PX || h == GY_IMG_DEVICE_PX) { w = gy__c.img[img].w; h = gy__c.img[img].h; }   /* 1:1 */
+    else { w = gy__px((float)w / (float)gy__c.theme.font_px); h = gy__px((float)h / (float)gy__c.theme.font_px); }   /* DIPs */
     r = gy__next();
     if (h > gy__rowh(l)) l->row_extra = gy__maxi(l->row_extra, h - gy__rowh(l));   /* the row grows to the picture */
     r.w = gy__mini(w, r.w); r.h = h;
-    gy__imagexy(img, r, w != gy__c.img[img].w || h != gy__c.img[img].h);
+    gy__imagexy(img, r, 0);                    /* nearest: pixel art stays sharp at any scale (gy_canvas_image can smooth) */
     gy__c.last = r;
 }
 
@@ -3498,6 +3535,7 @@ static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
         gy__c.passes = 2;
         return 1;
     }
+    case WM_SETTINGCHANGE: gy__contrast_check(); gy__c.passes = gy__maxi(gy__c.passes, 1); return 0;
     case WM_EXITSIZEMOVE: case WM_DISPLAYCHANGE: {   /* a same-DPI monitor with another size: only when the move ends */
         float old = gy__c.scale;
         RECT wr, cr;

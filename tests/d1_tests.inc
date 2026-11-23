@@ -229,3 +229,72 @@ static int t_w_dpi(void) {
     gy_begin(); gy_text("w_dpi"); gy_end();
     return 1;
 }
+
+/* high contrast: the system's colours while it is on, the app's own back when it goes off */
+static int stub_hc_on;
+static BOOL WINAPI stub_spi(UINT a, UINT n, PVOID p, UINT w) {
+    (void)n; (void)w;
+    if (a == SPI_GETHIGHCONTRAST) { HIGHCONTRASTW *h = (HIGHCONTRASTW *)p; h->dwFlags = stub_hc_on ? HCF_HIGHCONTRASTON : 0; return TRUE; }
+    return FALSE;
+}
+static int t_d1_contrast(void) {
+    gy_color bg0;
+    gy__os_t keep = gy__os;
+    if (!v_open()) return 0;
+    bg0 = gy_theme_get()->bg;
+    gy__os.spi = stub_spi; stub_hc_on = 1;
+    gy__contrast_check();
+    CHECK(gy_theme_get()->bg == gy__sys(COLOR_WINDOW) && gy_theme_get()->text == gy__sys(COLOR_WINDOWTEXT)
+          && gy_theme_get()->accent == gy__sys(COLOR_HIGHLIGHT) && gy_theme_get()->accent_text == gy__sys(COLOR_HIGHLIGHTTEXT)
+          && gy_theme_get()->text_off == gy__sys(COLOR_GRAYTEXT), "high contrast did not take the system colours");
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    stub_hc_on = 0;
+    gy__contrast_check();
+    CHECK(gy_theme_get()->bg == bg0, "the app's colours did not come back");
+    stub_hc_on = 1; gy__contrast_check();     /* leave it on for the picture */
+    frames(v_scene, 1);
+    gy__os = keep;
+    return 1;
+}
+
+/* the before/after sheet for the user's monitors: the demo's scene, the same 1540 x 950 DIP window,
+   at 100 % and at 125 % (DISPLAY2, 2560x1440), and at 125 % on the portrait DISPLAY3 (1440 px wide,
+   so the window opens at the work area's width) */
+static int sheet_clicks;
+static void sheet_body(void) {
+    static const float three[3] = { 160, 160, -1 }, two[2] = { 0.5f, -1 };
+    static int pixel = 0, tex = 1, size = 1;
+    int i;
+    gy_begin();
+    gy_text("GUICy %s.  Clicks: %d", GUICY_VERSION, sheet_clicks);   /* (no kernel name: every kernel set must draw the same) */
+    gy_row(3, three);
+    if (gy_button("Build")) sheet_clicks++;
+    gy_button("Stop"); gy_button("Open folder");
+    gy_row(2, two);
+    gy_check("Pixel look", &pixel); gy_check("Textures", &tex);
+    gy_row(3, three);
+    if (gy_select("Small", size == 0)) size = 0;
+    if (gy_select("Medium", size == 1)) size = 1;
+    if (gy_select("Large", size == 2)) size = 2;
+    gy_row(0, NULL);
+    for (i = 0; i < 20; i++) gy_text("Line %d of a longer panel of text, to give the renderer something to skip.", i + 1);
+    gy_end();
+}
+static int sheet_at(int w, int h, float k) {
+    if (!open_at(w, h)) return 0;
+    gy_scale_set(k);
+    gy_input_mouse(-100, -100); sheet_body(); sheet_body();
+    return 1;
+}
+static int t_d1_sheet_100(void) { return sheet_at(1540, 950, 1.0f); }
+static int t_d1_sheet_125(void) {             /* 1540 x 950 DIP at 125 %; also times a scale change */
+    LARGE_INTEGER f, t0, t1;
+    if (!sheet_at(1925, 1188, 1.0f)) return 0;
+    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
+    gy_scale_set(1.25f); sheet_body();        /* the change and its whole first frame (fonts, atlas, full redraw) */
+    QueryPerformanceCounter(&t1);
+    LOG("a scale change and its first frame: %.2f ms; ", (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart);
+    sheet_body();
+    return 1;
+}
+static int t_d1_sheet_125_portrait(void) { return sheet_at(1440, 1188, 1.25f); }   /* capped to the 1440 px work area */

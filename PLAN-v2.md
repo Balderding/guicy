@@ -505,10 +505,11 @@ reasons.
 | (F1 done) | +4 (estimate) | | **+9.6, total 95.7** |
 | H1: gy_attach/gy_event, the OS table, the test desktop guard, the test font hook, the text-record hook (tests only) | +2.5 | 98.2 | **+2.1, total 97.8** |
 | G0: the spike lives in `bench/gyspike.c`, outside guicy.h | 0 | 98.2 | |
-| D1: one scale function, the em theme resolved per factor, monitors, zoom keys, high contrast | +6 | 104.2 | |
+| D1: one scale function, the em theme resolved per factor, monitors, zoom keys, high contrast | +6 | 104.2 | **+9.0, total 106.8: over, see below** |
 | X1: DirectWrite fallback glyphs (5-8), IME (1.5), Tab/Shift+Tab focus (1) | +10 | 114.2 | |
 | L1: locks, the gate function, placement rules, the undo ring | +4 | 118.2 | |
 | A1-A3: the port hooks (timing hook, anything a port's API map finds missing) | +1.5 | **119.7** | |
+| **After D1, measured:** 106.8 + X1 10 + L1 4 + ports 1.5 | | **122.3: past the 120 kB cap** | the stop rule applies before X1 |
 | G2, T1, P1 default parts | +8 | **127.7: over the cap** | |
 
 **Stop rule (Master Control, 2026-11-23):** if a step's measured size plus the budgets still to come
