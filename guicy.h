@@ -132,7 +132,8 @@ int  gy_mods(void);                           /* GY_MOD_* held now */
 enum { GY_KEY_BACK = 0x08, GY_KEY_TAB = 0x09, GY_KEY_ENTER = 0x0D, GY_KEY_SHIFT = 0x10, GY_KEY_CTRL = 0x11,
        GY_KEY_ALT = 0x12, GY_KEY_ESC = 0x1B, GY_KEY_SPACE = 0x20, GY_KEY_PGUP = 0x21, GY_KEY_PGDN = 0x22,
        GY_KEY_END = 0x23, GY_KEY_HOME = 0x24, GY_KEY_LEFT = 0x25, GY_KEY_UP = 0x26, GY_KEY_RIGHT = 0x27,
-       GY_KEY_DOWN = 0x28, GY_KEY_DELETE = 0x2E, GY_KEY_F1 = 0x70, GY_KEY_PLUS = 0xBB, GY_KEY_MINUS = 0xBD };
+       GY_KEY_DOWN = 0x28, GY_KEY_DELETE = 0x2E, GY_KEY_F1 = 0x70, GY_KEY_PLUS = 0xBB, GY_KEY_MINUS = 0xBD,
+       GY_KEY_NUM0 = 0x60, GY_KEY_ADD = 0x6B, GY_KEY_SUBTRACT = 0x6D, GY_KEY_WHEEL = 0xFF /* the mouse wheel, for gy_keys_owned */ };
 enum { GY_MOD_SHIFT = 1, GY_MOD_CTRL = 2, GY_MOD_ALT = 4 };
 #define GY_KEYCODE(mods, key) ((mods) << 16 | (key))   /* a key with its modifiers, for gy_keys_owned */
 
@@ -246,6 +247,8 @@ float gy_scale(void);                        /* device pixels per DIP now */
 void  gy_font_size(int px);                  /* the user's font size in DIPs (0: the theme's); the whole UI follows it */
 void  gy_zoom_set(float z);                  /* 0.75 .. 3.0; Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+wheel step it */
 float gy_zoom(void);
+int   gy_view_save(char *buf, int cap);      /* the zoom and font size as one ini line: "zoom=1.10;font=15" */
+int   gy_view_load(const char *line);
 
 /* --- fonts, theme, kernels, stats, errors ------------------------------------------------------ */
 int  gy_font_add(const char *face, int px, int bold);   /* returns its index; 0 is the theme's font */
@@ -558,6 +561,7 @@ typedef struct gy__ctx {
     gy__tile tl[GY__TILEMAX];
     int ntl, troot, tfocus, tzoom, tlaid, tdrag, in_tile, tloaded;
     int tkeys[GY__TA_COUNT];
+    int zkeys[7];                              /* Ctrl+=, Ctrl+numpad+, Ctrl+-, Ctrl+numpad-, Ctrl+0, Ctrl+numpad0, Ctrl+wheel (0: off) */
     int owned[64];
     int nowned;
 
@@ -841,6 +845,7 @@ const char *gy_isa_name(void) {
 static int gy__font_make(const char *face, int px, int bold);
 static void gy__scale_apply(void);
 static void gy__tile_keys_default(void);
+static void gy__zoom_keys_default(void);
 
 static int gy__ncorners, gy__corner_off;       /* the corner cache (below), whose pages live in the arena */
 
@@ -865,6 +870,7 @@ static int gy__init(void) {
     else gy_isa_set(GY_ISA_AVX2);
     gy__c.troot = gy__c.tfocus = gy__c.tzoom = gy__c.tdrag = -1;
     gy__tile_keys_default();
+    gy__zoom_keys_default();
     gy__c.ready = 1;
     gy__c.scale = 1; gy__c.mon_factor = 1; gy__c.scale_fixed = 1; gy__c.zoom = 1;
     gy__resolve();
@@ -2248,6 +2254,12 @@ void gy_split_end(void) {
 #define GY__TILE_MIN_W (gy__c.rs.tile_w)
 #define GY__TILE_MIN_H (gy__c.rs.tile_h)
 
+static void gy__zoom_keys_default(void) {
+    int C = GY_MOD_CTRL << 16;
+    gy__c.zkeys[0] = C | GY_KEY_PLUS; gy__c.zkeys[1] = C | GY_KEY_ADD; gy__c.zkeys[2] = C | GY_KEY_MINUS;
+    gy__c.zkeys[3] = C | GY_KEY_SUBTRACT; gy__c.zkeys[4] = C | '0'; gy__c.zkeys[5] = C | GY_KEY_NUM0; gy__c.zkeys[6] = C | GY_KEY_WHEEL;
+}
+
 static void gy__tile_keys_default(void) {
     int A = GY_MOD_ALT << 16, AS = (GY_MOD_ALT | GY_MOD_SHIFT) << 16;
     int k[GY__TA_COUNT] = { A | GY_KEY_LEFT, A | GY_KEY_RIGHT, A | GY_KEY_UP, A | GY_KEY_DOWN,
@@ -2260,8 +2272,17 @@ static const char *const gy__tkey_names[GY__TA_COUNT] = { "focus_left", "focus_r
     "swap_left", "swap_right", "swap_up", "swap_down", "grow", "shrink", "flip", "zoom", "close", "next_tab" };
 
 static void gy__tile_clash_check(void) {
+    static const char *const zn[7] = { "zoom_in", "zoom_in (numpad)", "zoom_out", "zoom_out (numpad)", "zoom_reset", "zoom_reset (numpad)", "zoom_wheel" };
     int a, i;
     char msg[200];
+    for (a = 0; a < 7; a++)
+        for (i = 0; i < gy__c.nowned; i++)
+            if (gy__c.zkeys[a] && gy__c.zkeys[a] == gy__c.owned[i]) {
+                gy__fmt(msg, sizeof msg, "The zoom key for %s is one of the app's own keys, so it is off.", zn[a]);
+                gy__set_error(msg, NULL);
+                gy_error(msg);
+                gy__c.zkeys[a] = 0;
+            }
     for (a = 0; a < GY__TA_COUNT; a++)
         for (i = 0; i < gy__c.nowned; i++)
             if (gy__c.tkeys[a] && gy__c.tkeys[a] == gy__c.owned[i]) {
@@ -2796,6 +2817,59 @@ int gy_tile_keys_load(const char *s) {
 
 static int gy__dib(int w, int h);
 
+/* VS Code-style zoom: Ctrl+= / Ctrl+- in 10 % steps, Ctrl+0 back to 100 %, Ctrl+wheel. They work in
+   edit boxes too (an edit box leaves Ctrl keys it doesn't use). A zoom is a fresh layout at the new
+   scale on this very frame: no stretched picture is ever shown. */
+static void gy__zoom_keys(void) {
+    float z = gy__c.zoom;
+    int i, hit = 0;
+    for (i = 0; i < 6; i++) {
+        int k = gy__c.zkeys[i];
+        if (!k || !gy__take_key(k & 0xFFFF, k >> 16)) continue;
+        if (i < 2) z += 0.1f; else if (i < 4) z -= 0.1f; else z = 1.0f;
+        hit = 1;
+    }
+    if (gy__c.zkeys[6] && gy__c.wheel != 0 && gy__c.mods == GY_MOD_CTRL) { z += gy__c.wheel > 0 ? 0.1f : -0.1f; gy__c.wheel = 0; hit = 1; }
+    if (!hit) return;                          /* rounding only on a zoom key: 0.75 is the floor, not a 10 % step */
+    z = (float)(int)(z * 10.0f + 0.5f) / 10.0f;   /* whole 10 % steps */
+    z = gy__clampf(z, 0.75f, 3.0f);
+    if (z != gy__c.zoom) { gy__c.zoom = z; gy__scale_apply(); gy__c.passes = gy__maxi(gy__c.passes, 1); }
+}
+
+int gy_view_save(char *buf, int cap) {
+    char t[64];
+    int n;
+    gy__fmt(t, sizeof t, "zoom=%.2f;font=%d", (double)gy__c.zoom, gy__c.user_font ? gy__c.user_font : gy__c.theme.font_px);
+    n = gy__strlen(t);
+    if (n >= cap) return 0;
+    gy__memcpy(buf, t, (size_t)n + 1);
+    return 1;
+}
+
+int gy_view_load(const char *line) {
+    int ok;
+    const char *z, *f;
+    if (!gy__init() || !line) return 0;
+    for (z = line; *z && !(z[0] == 'z' && z[1] == 'o' && z[2] == 'o' && z[3] == 'm' && z[4] == '='); z++) {}
+    for (f = line; *f && !(f[0] == 'f' && f[1] == 'o' && f[2] == 'n' && f[3] == 't' && f[4] == '='); f++) {}
+    if (*z) {
+        char num[16];
+        int k = 0;
+        z += 5;
+        while (*z && *z != ';' && k < 15) num[k++] = *z++;
+        num[k] = 0;
+        { double v = gy__atof(num, &ok); if (ok) gy__c.zoom = gy__clampf((float)v, 0.75f, 3.0f); }
+    }
+    if (*f) {
+        int v = 0;
+        f += 5;
+        while (*f >= '0' && *f <= '9') v = v * 10 + (*f++ - '0');
+        if (v >= 6 && v <= 96) gy__c.user_font = v == gy__c.theme.font_px ? 0 : v;
+    }
+    gy__scale_apply();
+    return 1;
+}
+
 #ifdef GUICY_TESTS
 int gy_test_texts(const gy_test_text **out) { *out = gy__c.texts; return gy__c.ntexts; }
 
@@ -2820,6 +2894,7 @@ void gy_begin(void) {
     if (gy__c.hwnd && gy__c.resize_w && (gy__c.resize_w != gy__c.w || gy__c.resize_h != gy__c.h)) gy__dib(gy__c.resize_w, gy__c.resize_h);
     gy__c.resize_w = gy__c.resize_h = 0;
     if (gy__c.attached && gy__c.passes > 0) gy__c.passes--;   /* an app's own loop: this frame is one of the asked-for passes */
+    gy__zoom_keys();
     if (gy__c.anim_on && (int)(gy__c.now - gy__c.anim_at) >= 0) gy__c.anim_on = 0;   /* this is the frame it asked for */
     gy__c.frame.used = 0;
     gy__c.inst = NULL; gy__c.ninst = gy__c.cap_inst = 0;

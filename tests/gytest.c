@@ -178,6 +178,7 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "d1_look_150", t_d1_look_150 },
     { "d1_look_200", t_d1_look_200 },
     { "d1_seams", t_d1_seams },
+    { "d1_zoom", t_d1_zoom },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
 };

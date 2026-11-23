@@ -122,3 +122,42 @@ static int t_d1_seams(void) {
     gy_begin(); gy_canvas_line(10, 20.25f, 200, 20.25f, 1, GY_RGB(255, 255, 255)); gy_end();
     return 1;
 }
+
+/* zoom, VS Code style */
+static int t_d1_zoom(void) {
+    char line[64];
+    int i, owned[1] = { GY_KEYCODE(GY_MOD_CTRL, GY_KEY_PLUS) };
+    if (!v_open()) return 0;
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    key(v_scene, GY_MOD_CTRL, GY_KEY_PLUS);
+    CHECK(gy_zoom() > 1.09f && gy_zoom() < 1.11f && gy_scale() > 1.09f, "Ctrl+= gave zoom %.2f", (double)gy_zoom());
+    for (i = 0; i < 30; i++) key(v_scene, GY_MOD_CTRL, GY_KEY_PLUS);
+    CHECK(gy_zoom() == 3.0f, "the zoom went past 3.0 (%.2f)", (double)gy_zoom());
+    for (i = 0; i < 40; i++) key(v_scene, GY_MOD_CTRL, GY_KEY_SUBTRACT);
+    CHECK(gy_zoom() == 0.75f, "the zoom went under 0.75 (%.2f)", (double)gy_zoom());
+    key(v_scene, GY_MOD_CTRL, '0');
+    CHECK(gy_zoom() == 1.0f, "Ctrl+0 gave %.2f", (double)gy_zoom());
+    gy_input_mouse(AT_LIST);                   /* Ctrl+wheel over the list zooms, and doesn't scroll it */
+    gy_input_key(GY_KEY_CTRL, 1); gy_input_wheel(1); v_scene(); gy_input_key(GY_KEY_CTRL, 0); v_scene();
+    CHECK(gy_zoom() > 1.09f && gy_zoom() < 1.11f, "Ctrl+wheel gave %.2f", (double)gy_zoom());
+    /* after a zoom: the next frame is drawn at the new size, then nothing more */
+    gy_input_mouse(-100, -100); v_scene();
+    v_scene(); CHECK(gy_get_stats().dirty_tiles == 0, "a quiet frame after a zoom drew %d tiles", gy_get_stats().dirty_tiles);
+    gy_view_save(line, sizeof line);
+    LOG("saved \"%s\"; ", line);
+    gy_shutdown();
+    if (!v_open()) return 0;
+    CHECK(gy_view_load(line) && gy_zoom() > 1.09f && gy_zoom() < 1.11f, "the zoom did not come back from \"%s\"", line);
+    /* an app that owns Ctrl+= keeps it: that zoom key is off, a banner says so, numpad + still zooms */
+    gy_keys_owned(owned, 1);
+    CHECK(strstr(gy_last_error(), "zoom_in") != NULL, "no clash message: %s", gy_last_error());
+    gy_zoom_set(1);
+    V.key_d = 0;
+    key(v_scene, GY_MOD_CTRL, GY_KEY_PLUS);
+    CHECK(gy_zoom() == 1.0f, "the app's own Ctrl+= zoomed");
+    key(v_scene, GY_MOD_CTRL, GY_KEY_ADD);
+    CHECK(gy_zoom() > 1.09f, "Ctrl+numpad+ did not zoom");
+    gy_zoom_set(1);
+    gy_input_mouse(-100, -100); frames(v_scene, 2);
+    return 1;
+}
