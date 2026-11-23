@@ -213,6 +213,30 @@ int  gy_tile_keys_save(char *buf, int cap);   /* the tile keys as one line, for 
 int  gy_tile_keys_load(const char *line);
 void gy_keys_owned(const int *keys, int n);   /* the app's own keys (GY_KEYCODE): tile keys never take them */
 
+/* developer locks. A rule places a tile when it first opens and says what the user may not do to it.
+   A lock is final: no key, click, saved line or setting undoes it (only a window too small even at
+   75 % lets locked sizes give way, in proportion, until it grows again). Make the rules before
+   gy_tiles_load. */
+enum { GY_LOCK_MOVE = 1,                       /* its place in the layout never changes (no swap, no drag) */
+       GY_LOCK_SIZE = 2,                       /* its width (side left/right) or height (top/bottom) stays,
+                                                  in DIPs, whatever the window does */
+       GY_LOCK_CLOSE = 4, GY_LOCK_FLOAT = 8,   /* the user can't close it; can't float it */
+       GY_LOCK_TABS = 16,                      /* no tab joins its stack, it never becomes a tab elsewhere */
+       GY_LOCK_SPLIT = 32,                     /* nothing splits it or lands in it */
+       GY_LOCK_ALL = 63 };
+enum { GY_SIDE_NONE, GY_SIDE_LEFT, GY_SIDE_RIGHT, GY_SIDE_TOP, GY_SIDE_BOTTOM };
+typedef struct gy_rule {
+    int side;                                  /* GY_SIDE_*: the whole window's side it opens on */
+    float w, h;                                /* its width (left/right) or height (top/bottom) in DIPs, 0: a quarter */
+    const char *tab_of;                        /* or: a tab in this tile's stack */
+    int lock;                                  /* GY_LOCK_* */
+} gy_rule;
+void gy_tile_rule(const char *name, gy_rule r);
+void gy_layout_lock(int on);                   /* 1: the user can change nothing in the layout (the tiles' own
+                                                  locks stay when it goes off) */
+void gy_tiles_reset(void);                     /* back to the code layout (the user's key: Alt+Shift+Backspace) */
+#define GY_SPLIT_LOCK 0x100                    /* gy_split(id, GY_H | GY_SPLIT_LOCK, ...): the user can't move it */
+
 /* --- images and the canvas ---------------------------------------------------------------------- */
 enum { GY_FMT_RGBA, GY_FMT_BGRA, GY_FMT_BGRA_PM };   /* straight RGBA (stb_image), straight BGRA, premultiplied */
 int  gy_image_make(int w, int h, const void *px, int fmt);   /* returns an image id (> 0), 0 on failure */
@@ -476,10 +500,13 @@ typedef struct gy__tnode {
 typedef struct gy__tile {
     uint32_t id;
     char name[40];
-    int seen, hidden, from_load;
+    int seen, hidden, from_load, app_closed;
+    int lock, side;                            /* its rule (gy_tile_rule) */
+    float rw, rh;
+    char tab_of[40];
 } gy__tile;
 enum { GY__TA_FOCUS_L, GY__TA_FOCUS_R, GY__TA_FOCUS_U, GY__TA_FOCUS_D, GY__TA_SWAP_L, GY__TA_SWAP_R, GY__TA_SWAP_U,
-       GY__TA_SWAP_D, GY__TA_GROW, GY__TA_SHRINK, GY__TA_FLIP, GY__TA_ZOOM, GY__TA_CLOSE, GY__TA_TAB, GY__TA_COUNT };
+       GY__TA_SWAP_D, GY__TA_GROW, GY__TA_SHRINK, GY__TA_FLIP, GY__TA_ZOOM, GY__TA_CLOSE, GY__TA_TAB, GY__TA_RESET, GY__TA_COUNT };
 
 /* --- images ------------------------------------------------------------------------------------- */
 #define GY__IMAGES 256
@@ -625,6 +652,10 @@ typedef struct gy__ctx {
     gy__tile tl[GY__TILEMAX];
     int ntl, troot, tfocus, tzoom, tlaid, tdrag, in_tile, tloaded;
     int tkeys[GY__TA_COUNT];
+    int layout_lock, lmin_w, lmin_h;           /* locks: the whole layout; the window's smallest for the locked sizes */
+    char lock_msg[48];                         /* "Locked: <name>", shown 2 s after a refusal */
+    unsigned lock_t;
+    float fitz, fit_want, giveway;             /* too small: GUICy's own zoom (75 %..100 %), then the locked sizes' share */
     int zkeys[7];                              /* Ctrl+=, Ctrl+numpad+, Ctrl+-, Ctrl+numpad-, Ctrl+0, Ctrl+numpad0, Ctrl+wheel (0: off) */
     int owned[64];
     int nowned;
@@ -1174,7 +1205,7 @@ GY__SMALL static int gy__font_make(const char *face, int dip, int bold) {
 GY__SMALL static void gy__scale_apply(void) {
     float mon = gy__c.scale_mode == GY_SCALE_FIXED ? gy__c.scale_fixed : gy__c.mon_factor;
     float fr = gy__c.user_font > 0 ? (float)gy__c.user_font / (float)gy__c.theme.font_px : 1.0f;
-    float ns = (mon > 0 ? mon : 1.0f) * (gy__c.zoom > 0 ? gy__c.zoom : 1.0f) * fr;
+    float ns = (mon > 0 ? mon : 1.0f) * (gy__c.zoom > 0 ? gy__c.zoom : 1.0f) * fr * (gy__c.fitz > 0 ? gy__c.fitz : 1.0f);
     int i;
     if (ns == gy__c.scale && gy__c.scale > 0) return;
     gy__c.scale = ns;
@@ -2571,14 +2602,21 @@ void gy_panel_end(void) {
 
 static void gy__split_px(const char *idl, int dir, float *pos, float def) {
     uint32_t id = gy__id(idl);
+    int locked = dir & GY_SPLIT_LOCK;
     gy__ir r = gy__take_rows(0), a, b, d;
     gy__lay *l;
-    int hot, held, size = dir == GY_H ? r.w : r.h, dw = GY__S.split, mp = gy__px(40.0f / 15);
+    int hot, held, size, dw = GY__S.split, mp = gy__px(40.0f / 15);
     float p;
+    dir &= 1;
+    size = dir == GY_H ? r.w : r.h;
     if (*pos <= 0) *pos = def;
     d = r;
     if (dir == GY_H) { d.x = r.x + (int)*pos; d.w = dw; } else { d.y = r.y + (int)*pos; d.h = dw; }
     (void)gy__button_logic(id, d, &hot, &held);
+    if (locked && (hot || held)) {             /* the developer's lock: no drag, no reset, no resize cursor */
+        if (gy__c.pressed[0]) { gy__fmt(gy__c.lock_msg, sizeof gy__c.lock_msg, "Locked: %s", gy__label_end(idl) == idl ? "this divider" : idl); gy__c.lock_t = gy__c.now; gy_animate(2000); }
+        hot = held = 0; if (gy__c.active == id) gy__c.active = 0;
+    }
     if (held) *pos = (float)(dir == GY_H ? gy__c.mx - r.x : gy__c.my - r.y) - dw / 2;
     if (hot && gy__c.dbl[0]) { *pos = def; gy__c.active = 0; }   /* double-click: back to the default */
     p = gy__clampf(*pos, (float)mp, (float)gy__maxi(mp, size - mp - dw));
@@ -2620,18 +2658,18 @@ static void gy__zoom_keys_default(void) {
     gy__c.zkeys[3] = C | GY_KEY_SUBTRACT; gy__c.zkeys[4] = C | '0'; gy__c.zkeys[5] = C | GY_KEY_NUM0; gy__c.zkeys[6] = C | GY_KEY_WHEEL;
 }
 
-static void gy__tile_keys_default(void) {
+GY__SMALL static void gy__tile_keys_default(void) {
     int A = GY_MOD_ALT << 16, AS = (GY_MOD_ALT | GY_MOD_SHIFT) << 16;
     int k[GY__TA_COUNT] = { A | GY_KEY_LEFT, A | GY_KEY_RIGHT, A | GY_KEY_UP, A | GY_KEY_DOWN,
                             AS | GY_KEY_LEFT, AS | GY_KEY_RIGHT, AS | GY_KEY_UP, AS | GY_KEY_DOWN,
-                            A | GY_KEY_PLUS, A | GY_KEY_MINUS, A | 'F', A | 'Z', A | 'W', A | 'T' };
+                            A | GY_KEY_PLUS, A | GY_KEY_MINUS, A | 'F', A | 'Z', A | 'W', A | 'T', AS | GY_KEY_BACK };
     gy__memcpy(gy__c.tkeys, k, sizeof k);
 }
 
 static const char *const gy__tkey_names[GY__TA_COUNT] = { "focus_left", "focus_right", "focus_up", "focus_down",
-    "swap_left", "swap_right", "swap_up", "swap_down", "grow", "shrink", "flip", "zoom", "close", "next_tab" };
+    "swap_left", "swap_right", "swap_up", "swap_down", "grow", "shrink", "flip", "zoom", "close", "next_tab", "reset" };
 
-static void gy__tile_clash_check(void) {
+GY__SMALL static void gy__tile_clash_check(void) {
     static const char *const zn[7] = { "zoom_in", "zoom_in (numpad)", "zoom_out", "zoom_out (numpad)", "zoom_reset", "zoom_reset (numpad)", "zoom_wheel" };
     int a, i;
     char msg[200];
@@ -2674,18 +2712,92 @@ static int gy__tile_leaf(int t) {
 }
 static int gy__first_leaf(int n) { while (n >= 0 && !gy__c.tn[n].leaf) n = gy__c.tn[n].a; return n; }
 
+/* --- locks ---------------------------------------------------------------------------------------- */
+/* the code locks of every tile under node n */
+static int gy__sub_lock(int n) {
+    gy__tnode *t = &gy__c.tn[n];
+    int k, f = 0;
+    if (n < 0) return 0;
+    if (!t->leaf) return gy__sub_lock(t->a) | gy__sub_lock(t->b);
+    for (k = 0; k < t->ntabs; k++) f |= gy__c.tl[t->tabs[k]].lock;
+    return f;
+}
+/* the DIP size a SIZE-locked tile under n holds on axis dir (0: none). Side by side on that axis
+   there is no one size; stacked across it, the biggest. */
+static float gy__fix(int n, int dir) {
+    gy__tnode *t = &gy__c.tn[n];
+    float f = 0;
+    int k;
+    if (t->leaf) {
+        for (k = 0; k < t->ntabs; k++) {
+            gy__tile *tl = &gy__c.tl[t->tabs[k]];
+            if (tl->lock & GY_LOCK_SIZE) f = gy__maxf(f, dir == GY_H ? tl->rw : tl->rh);
+        }
+        return f;
+    }
+    return t->dir == dir ? 0 : gy__maxf(gy__fix(t->a, dir), gy__fix(t->b, dir));
+}
+/* a refusal: nothing changes; "Locked: <name>" for 2 s */
+GY__SMALL static int gy__refuse(int n) {
+    int l = gy__first_leaf(n);
+    gy__fmt(gy__c.lock_msg, sizeof gy__c.lock_msg, "Locked: %s", l >= 0 ? gy__c.tl[gy__c.tn[l].tabs[gy__c.tn[l].active]].name : "the layout");
+    gy__c.lock_t = gy__c.now;
+    gy_animate(2000);
+    return 0;
+}
+/* the gate: may the user do what the flags guard to node n (and everything under it)? */
+static int gy__may(int n, int flags) {
+    if (n < 0 || !((gy__sub_lock(n) | (gy__c.layout_lock ? GY_LOCK_ALL : 0)) & flags)) return 1;
+    return gy__refuse(n);
+}
+/* may the user move split p's divider (a key, a drag, a double-click)? Not when a side holds a locked size */
+static int gy__may_ratio(int p) {
+    gy__tnode *t = &gy__c.tn[p];
+    if (gy__c.layout_lock || gy__fix(t->a, t->dir) > 0) return gy__refuse(t->a);
+    if (gy__fix(t->b, t->dir) > 0) return gy__refuse(t->b);
+    return 1;
+}
+/* the px node n needs on axis dir at today's scale: the minimum tile, or a locked size */
+static int gy__tneed(int n, int dir) {
+    gy__tnode *t = &gy__c.tn[n];
+    if (t->leaf) return gy__maxi(dir == GY_H ? GY__TILE_MIN_W : GY__TILE_MIN_H, (int)(gy__fix(n, dir) * gy__c.scale + 0.5f));
+    if (t->dir == dir) return gy__tneed(t->a, dir) + GY__S.split + gy__tneed(t->b, dir);
+    return gy__maxi(gy__tneed(t->a, dir), gy__tneed(t->b, dir));
+}
+
+static gy__ir gy__tile_area(void);
+/* too small for the locked sizes: GUICy's own zoom goes down, in 5 % steps, to 75 % (applied at the
+   next gy_begin); below that the locked sizes give way in proportion. Growing undoes both. */
+GY__SMALL static void gy__tiles_fit(void) {
+    gy__ir A = gy__tile_area();
+    float q, f, fz = gy__c.fitz > 0 ? gy__c.fitz : 1;
+    int nw, nh;
+    gy__c.giveway = 1;
+    if (gy__c.troot < 0 || !(gy__sub_lock(gy__c.troot) & GY_LOCK_SIZE)) { gy__c.fit_want = 1; gy__c.lmin_w = gy__c.lmin_h = 0; return; }
+    nw = gy__tneed(gy__c.troot, GY_H); nh = gy__tneed(gy__c.troot, GY_V);
+    gy__c.lmin_w = (int)((float)(nw + GY__S.pad) / fz + 0.5f); gy__c.lmin_h = (int)((float)(nh + GY__S.pad) / fz + 0.5f);   /* at 100 % */
+    q = gy__minf((float)A.w / (float)nw, (float)A.h / (float)nh);
+    f = gy__clampf((float)(int)(fz * q * 20.0f + 0.001f) / 20.0f, 0.75f, 1.0f);
+    if (f != fz) { gy__c.fit_want = f; gy__c.passes = gy__maxi(gy__c.passes, 2); }
+    if (fz <= 0.75f && q < 1) gy__c.giveway = q;   /* even at 75 %: the locked sizes give way */
+}
+
 static void gy__tlayout(int n, gy__ir r) {
     gy__tnode *t = &gy__c.tn[n];
+    float fa, fb, k = gy__c.scale * (gy__c.giveway > 0 ? gy__c.giveway : 1);
+    int avail, aw;
     t->r = r;
     if (t->leaf) return;
+    avail = (t->dir == GY_H ? r.w : r.h) - GY__S.split;
+    fa = gy__fix(t->a, t->dir); fb = fa > 0 ? 0 : gy__fix(t->b, t->dir);   /* a locked size holds its px */
+    aw = fa > 0 ? (int)(fa * k + 0.5f) : fb > 0 ? avail - (int)(fb * k + 0.5f) : (int)((float)avail * t->ratio);
+    aw = gy__clampi(aw, 0, gy__maxi(0, avail));
     if (t->dir == GY_H) {
-        int aw = (int)((float)(r.w - GY__S.split) * t->ratio);
         gy__tlayout(t->a, (gy__ir){ r.x, r.y, aw, r.h });
         gy__tlayout(t->b, (gy__ir){ r.x + aw + GY__S.split, r.y, r.w - aw - GY__S.split, r.h });
     } else {
-        int ah = (int)((float)(r.h - GY__S.split) * t->ratio);
-        gy__tlayout(t->a, (gy__ir){ r.x, r.y, r.w, ah });
-        gy__tlayout(t->b, (gy__ir){ r.x, r.y + ah + GY__S.split, r.w, r.h - ah - GY__S.split });
+        gy__tlayout(t->a, (gy__ir){ r.x, r.y, r.w, aw });
+        gy__tlayout(t->b, (gy__ir){ r.x, r.y + aw + GY__S.split, r.w, r.h - aw - GY__S.split });
     }
 }
 
@@ -2707,14 +2819,41 @@ static int gy__tiles_short(void) {
 }
 
 /* a leaf can be split when both halves, on its longer side, keep the minimum tile size */
+/* the side rule of a tile in leaf n (0: none): a side panel stays whole, nothing splits or stacks into it */
+static int gy__side_leaf(int n) {
+    int k;
+    for (k = 0; k < gy__c.tn[n].ntabs; k++) if (gy__c.tl[gy__c.tn[n].tabs[k]].side) return gy__c.tl[gy__c.tn[n].tabs[k]].side;
+    return 0;
+}
 static int gy__tile_can_split(int n) {
     gy__ir r = gy__c.tn[n].r;
+    if ((gy__sub_lock(n) & (GY_LOCK_MOVE | GY_LOCK_SPLIT)) || gy__side_leaf(n)) return 0;   /* a locked tile or side panel is never split */
     if (r.w >= r.h) return (r.w - GY__S.split) / 2 >= GY__TILE_MIN_W && r.h >= GY__TILE_MIN_H;
     return (r.h - GY__S.split) / 2 >= GY__TILE_MIN_H && r.w >= GY__TILE_MIN_W;
 }
 
 /* put tile t next to the focused leaf (or as a tab when there is no room) */
-static void gy__tile_insert(int t) {
+/* the share of the window a side tile's rule asks for, on axis dir (a quarter without a size) */
+static float gy__rule_share(int t, int dir) {
+    gy__ir A = gy__tile_area();
+    float want = (dir == GY_H ? gy__c.tl[t].rw : gy__c.tl[t].rh) * gy__c.scale, ext = (float)((dir == GY_H ? A.w : A.h) - GY__S.split);
+    return want > 0 ? gy__clampf(want / ext, 0.1f, 0.9f) : 0.25f;
+}
+/* the whole tree gets a new neighbour: tile t's leaf first (left/top) or last, ratio for side a */
+static int gy__wrap_root(int t, int first, int dir, float ratio) {
+    int i, freen = 0, nl, sp;
+    for (i = 0; i < GY__TNODES; i++) freen += !gy__c.tn[i].used;
+    if (freen < 2) return 0;
+    nl = gy__tnode_new(); sp = gy__tnode_new();
+    gy__c.tn[nl].leaf = 1; gy__c.tn[nl].ntabs = 1; gy__c.tn[nl].tabs[0] = t; gy__c.tn[nl].parent = sp;
+    gy__c.tn[sp].dir = dir; gy__c.tn[sp].ratio = ratio; gy__c.tn[sp].parent = -1;
+    gy__c.tn[sp].a = first ? nl : gy__c.troot; gy__c.tn[sp].b = first ? gy__c.troot : nl;
+    gy__c.tn[gy__c.troot].parent = sp; gy__c.troot = sp;
+    gy__tlayout(gy__c.troot, gy__tile_area());
+    return 1;
+}
+
+GY__SMALL static void gy__tile_insert(int t) {
     int leaf = gy__c.tfocus >= 0 && gy__c.tn[gy__c.tfocus].used ? gy__c.tfocus : gy__first_leaf(gy__c.troot), nl, sp;
     gy__tnode *L;
     if (gy__c.troot < 0) {
@@ -2725,17 +2864,35 @@ static void gy__tile_insert(int t) {
         gy__tlayout(gy__c.troot, gy__tile_area());
         return;
     }
+    {   /* its rule: a tab of another tile, or the whole window's side */
+        gy__tile *T = &gy__c.tl[t];
+        if (T->tab_of[0]) {
+            int o = gy__tile_find(gy__hash(T->tab_of, 0x711E)), ol = o >= 0 ? gy__tile_leaf(o) : -1;
+            if (ol >= 0 && gy__c.tn[ol].ntabs < GY__TABS) { gy__c.tn[ol].tabs[gy__c.tn[ol].ntabs++] = t; return; }
+        }
+        if (T->side) {
+            int first = T->side == GY_SIDE_LEFT || T->side == GY_SIDE_TOP, dir = T->side <= GY_SIDE_RIGHT ? GY_H : GY_V;
+            float r = gy__rule_share(t, dir);
+            if (gy__wrap_root(t, first, dir, first ? r : 1 - r)) return;
+        }
+    }
     /* the focused leaf if it can be split, else a tab there if its stack has room, else the
        biggest leaf anywhere that can be split, else any stack with room; never a tile under
        the minimum size, never a ninth tab */
     if (!gy__tile_can_split(leaf)) {
         int n, best = -1, area = 0;
-        if (gy__c.tn[leaf].ntabs < GY__TABS) { L = &gy__c.tn[leaf]; L->tabs[L->ntabs++] = t; return; }
+        if (gy__c.tn[leaf].ntabs < GY__TABS && !(gy__sub_lock(leaf) & (GY_LOCK_TABS | GY_LOCK_SPLIT)) && !gy__side_leaf(leaf) && !(gy__c.tl[t].lock & GY_LOCK_TABS)) { L = &gy__c.tn[leaf]; L->tabs[L->ntabs++] = t; return; }
         for (n = 0; n < GY__TNODES; n++)
             if (gy__c.tn[n].used && gy__c.tn[n].leaf && gy__tile_can_split(n) && gy__c.tn[n].r.w * gy__c.tn[n].r.h > area) { best = n; area = gy__c.tn[n].r.w * gy__c.tn[n].r.h; }
         if (best < 0) {
             for (n = 0; n < GY__TNODES; n++)
-                if (gy__c.tn[n].used && gy__c.tn[n].leaf && gy__c.tn[n].ntabs < GY__TABS) { gy__c.tn[n].tabs[gy__c.tn[n].ntabs++] = t; return; }
+                if (gy__c.tn[n].used && gy__c.tn[n].leaf && gy__c.tn[n].ntabs < GY__TABS && !(gy__sub_lock(n) & (GY_LOCK_TABS | GY_LOCK_SPLIT)) && !gy__side_leaf(n)) { gy__c.tn[n].tabs[gy__c.tn[n].ntabs++] = t; return; }
+            {   /* only side panels: beside the whole layout, opposite a lone side tile at its rule size */
+                int sl = gy__c.tn[gy__c.troot].leaf ? gy__side_leaf(gy__c.troot) : 0, first = sl == GY_SIDE_RIGHT || sl == GY_SIDE_BOTTOM;
+                int dir = sl ? (sl <= GY_SIDE_RIGHT ? GY_H : GY_V) : GY_H;
+                float r = sl ? gy__rule_share(gy__c.tn[gy__c.troot].tabs[0], dir) : 0.5f;
+                if (gy__wrap_root(t, first, dir, first ? 1 - r : r)) return;
+            }
             gy__set_error("GUICy: no room for another tile", gy__c.tl[t].name);
             return;
         }
@@ -2760,7 +2917,7 @@ static void gy__tile_insert(int t) {
 }
 
 /* take tile t out of its stack; an empty leaf goes, and its sibling takes the parent's place */
-static void gy__tile_remove(int t) {
+GY__SMALL static void gy__tile_remove(int t) {
     int leaf = gy__tile_leaf(t), k, p, sib, gp;
     gy__tnode *L;
     if (leaf < 0) return;
@@ -2784,7 +2941,7 @@ static void gy__tile_remove(int t) {
     gy__tlayout(gy__c.troot, gy__tile_area());
 }
 
-static int gy__tile_add(const char *name) {
+GY__SMALL static int gy__tile_add(const char *name) {
     uint32_t id = gy__hash(name, 0x711E);
     int t = gy__tile_find(id);
     if (t >= 0) return t;
@@ -2805,20 +2962,43 @@ static void gy__tile_ensure(int t) {
     if (gy__tile_leaf(t) < 0 && !gy__c.tl[t].hidden) gy__tile_insert(t);
 }
 
-void gy_tile_open(const char *name) {
+GY__SMALL void gy_tile_open(const char *name) {
     int t;
     if (!gy__init() || (t = gy__tile_add(name)) < 0) return;
-    gy__c.tl[t].hidden = 0;
+    gy__c.tl[t].hidden = 0; gy__c.tl[t].app_closed = 0;
     gy__tile_ensure(t);
     gy__c.passes = gy__maxi(gy__c.passes, 1);
 }
-void gy_tile_close(const char *name) {
+GY__SMALL void gy_tile_close(const char *name) {
     int t;
     if (!gy__init() || (t = gy__tile_add(name)) < 0) return;   /* a tile not seen yet starts closed */
     gy__tile_remove(t);
-    gy__c.tl[t].hidden = 1;
+    gy__c.tl[t].hidden = 1; gy__c.tl[t].app_closed = 1;
 }
-void gy_tile_focus(const char *name) {
+
+GY__SMALL void gy_tile_rule(const char *name, gy_rule r) {
+    int t, k;
+    if (!gy__init() || (t = gy__tile_add(name)) < 0) return;
+    gy__c.tl[t].side = r.side; gy__c.tl[t].rw = r.w; gy__c.tl[t].rh = r.h; gy__c.tl[t].lock = r.lock;
+    for (k = 0; r.tab_of && r.tab_of[k] && k < 39; k++) gy__c.tl[t].tab_of[k] = r.tab_of[k];
+    gy__c.tl[t].tab_of[k] = 0;
+}
+void gy_layout_lock(int on) { gy__c.layout_lock = on; }
+
+/* the code layout: the tiles the app has open, placed again by their rules in the order they first
+   opened (a tile the user closed comes back; one the app closed doesn't) */
+GY__SMALL void gy_tiles_reset(void) {
+    int i;
+    if (!gy__init()) return;
+    for (i = 0; i < GY__TNODES; i++) gy__c.tn[i].used = 0;
+    gy__c.troot = gy__c.tfocus = gy__c.tzoom = -1;
+    for (i = 0; i < gy__c.ntl; i++) {
+        gy__c.tl[i].hidden = gy__c.tl[i].app_closed;
+        if (!gy__c.tl[i].hidden && gy__c.tl[i].seen >= 0) gy__tile_insert(i);
+    }
+    gy__c.passes = gy__maxi(gy__c.passes, 1);
+}
+GY__SMALL void gy_tile_focus(const char *name) {
     int t = gy__tile_find(gy__hash(name, 0x711E)), leaf = t >= 0 ? gy__tile_leaf(t) : -1, k;
     if (leaf < 0) return;
     gy__c.tfocus = leaf;
@@ -2826,7 +3006,7 @@ void gy_tile_focus(const char *name) {
 }
 
 /* the leaf next to `from` in a direction: the nearest one whose edge faces it, most overlap first */
-static int gy__tile_neighbour(int from, int dx, int dy) {
+GY__SMALL static int gy__tile_neighbour(int from, int dx, int dy) {
     gy__ir a = gy__c.tn[from].r;
     int n, best = -1, bestd = 1 << 30;
     for (n = 0; n < GY__TNODES; n++) {
@@ -2848,7 +3028,7 @@ static int gy__tile_neighbour(int from, int dx, int dy) {
     return best;
 }
 
-static void gy__tile_swap_leaves(int a, int b) {
+GY__SMALL static void gy__tile_swap_leaves(int a, int b) {
     gy__tnode t = gy__c.tn[a];
     gy__memcpy(gy__c.tn[a].tabs, gy__c.tn[b].tabs, sizeof t.tabs);
     gy__c.tn[a].ntabs = gy__c.tn[b].ntabs; gy__c.tn[a].active = gy__c.tn[b].active;
@@ -2856,7 +3036,7 @@ static void gy__tile_swap_leaves(int a, int b) {
     gy__c.tn[b].ntabs = t.ntabs; gy__c.tn[b].active = t.active;
 }
 
-static void gy__tile_keys(void) {
+GY__SMALL static void gy__tile_keys(void) {
     int f = gy__c.tfocus, a, k, n, p;
     static const int dirs[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
     if (gy__c.focus || f < 0 || !gy__c.tn[f].used) return;
@@ -2864,10 +3044,10 @@ static void gy__tile_keys(void) {
         k = gy__c.tkeys[a];
         if (!k || !gy__take_key(k & 0xFFFF, k >> 16)) continue;
         if (a <= GY__TA_FOCUS_D) { n = gy__tile_neighbour(f, dirs[a][0], dirs[a][1]); if (n >= 0) gy__c.tfocus = f = n; }
-        else if (a <= GY__TA_SWAP_D) { n = gy__tile_neighbour(f, dirs[a - 4][0], dirs[a - 4][1]); if (n >= 0) { gy__tile_swap_leaves(f, n); gy__c.tfocus = f = n; } }
+        else if (a <= GY__TA_SWAP_D) { n = gy__tile_neighbour(f, dirs[a - 4][0], dirs[a - 4][1]); if (n >= 0 && gy__may(f, GY_LOCK_MOVE) && gy__may(n, GY_LOCK_MOVE)) { gy__tile_swap_leaves(f, n); gy__c.tfocus = f = n; } }
         else if (a == GY__TA_GROW || a == GY__TA_SHRINK) {
             p = gy__c.tn[f].parent;
-            if (p >= 0) {
+            if (p >= 0 && gy__may_ratio(p)) {
                 float d = a == GY__TA_GROW ? 0.05f : -0.05f, old = gy__c.tn[p].ratio;
                 int before = gy__tiles_short();
                 gy__c.tn[p].ratio = gy__clampf(gy__c.tn[p].ratio + (gy__c.tn[p].a == f ? d : -d), 0.1f, 0.9f);
@@ -2876,7 +3056,7 @@ static void gy__tile_keys(void) {
         }
         else if (a == GY__TA_FLIP) {
             p = gy__c.tn[f].parent;
-            if (p >= 0) {
+            if (p >= 0 && gy__may(p, GY_LOCK_SIZE | GY_LOCK_MOVE)) {
                 int before = gy__tiles_short();
                 gy__c.tn[p].dir = !gy__c.tn[p].dir;
                 if (gy__tiles_short() > before) gy__c.tn[p].dir = !gy__c.tn[p].dir;   /* refused, as above */
@@ -2885,9 +3065,11 @@ static void gy__tile_keys(void) {
         else if (a == GY__TA_ZOOM) gy__c.tzoom = gy__c.tzoom == f ? -1 : f;
         else if (a == GY__TA_CLOSE) {
             int t = gy__c.tn[f].tabs[gy__c.tn[f].active];
+            if ((gy__c.tl[t].lock | (gy__c.layout_lock ? GY_LOCK_ALL : 0)) & GY_LOCK_CLOSE) { gy__refuse(f); continue; }
             gy__tile_remove(t); gy__c.tl[t].hidden = 1; f = gy__c.tfocus;
             if (f < 0) return;
         }
+        else if (a == GY__TA_RESET) { gy_tiles_reset(); f = gy__c.tfocus; if (f < 0) return; }
         else if (a == GY__TA_TAB && gy__c.tn[f].ntabs > 1) gy__c.tn[f].active = (gy__c.tn[f].active + 1) % gy__c.tn[f].ntabs;
         gy__tlayout(gy__c.troot, gy__tile_area());
     }
@@ -2897,6 +3079,7 @@ static void gy__tile_keys(void) {
 static void gy__tile_chrome(void) {
     int n, k, hot, held;
     if (gy__c.troot < 0) return;
+    gy__tiles_fit();
     gy__tlayout(gy__c.troot, gy__tile_area());
     gy__tile_keys();
     if (gy__c.troot < 0) return;
@@ -2908,6 +3091,10 @@ static void gy__tile_chrome(void) {
         if (t->dir == GY_H) { d.x = gy__c.tn[t->a].r.x + gy__c.tn[t->a].r.w; d.y = t->r.y; d.w = GY__S.split; d.h = t->r.h; }
         else { d.x = t->r.x; d.y = gy__c.tn[t->a].r.y + gy__c.tn[t->a].r.h; d.w = t->r.w; d.h = GY__S.split; }
         (void)gy__button_logic(0x7D1Du + (uint32_t)n, d, &hot, &held);
+        if ((hot || held) && (gy__c.layout_lock || gy__fix(t->a, t->dir) > 0 || gy__fix(t->b, t->dir) > 0)) {   /* locked: no drag, no cursor */
+            if (gy__c.pressed[0]) gy__may_ratio(n);
+            hot = held = 0; if (gy__c.active == 0x7D1Du + (uint32_t)n) gy__c.active = 0;
+        }
         if (held || (hot && gy__c.dbl[0])) {   /* a drag, or a double-click back to the middle; never a tile under its minimum */
             float old = t->ratio;
             int before = gy__tiles_short();
@@ -2953,10 +3140,13 @@ static void gy__tile_chrome(void) {
         x = bar.x + GY__S.inset;
         for (k = 0; k < t->ntabs; k++) {
             gy__tile *tl = &gy__c.tl[t->tabs[k]];
-            int w = gy__text_w(tl->name, NULL) + 2 * GY__S.pad, th, tdn;
+            static const char lockch[] = "\xf0\x9f\x94\x92";   /* a padlock after a locked tile's name */
+            int lk = tl->lock || gy__c.layout_lock, lw = lk ? gy__text_w(lockch, NULL) + GY__S.gap : 0;
+            int w = gy__text_w(tl->name, NULL) + 2 * GY__S.pad + lw, th, tdn;
             gy__ir tab = { x, bar.y + 2 * GY__S.line, w, bar.h - 3 * GY__S.line };
             if (gy__button_logic(0x7AB0u ^ tl->id, tab, &th, &tdn)) { t->active = k; gy__c.tfocus = n; }
-            if (tdn && gy__c.pressed[0]) gy__c.tdrag = t->tabs[k];
+            if (tdn && gy__c.pressed[0] && gy__may(n, (tl->lock & GY_LOCK_MOVE) || t->ntabs == 1 ? GY_LOCK_MOVE : GY_LOCK_TABS)) gy__c.tdrag = t->tabs[k];
+            if (lk) gy__textxy(x + w - GY__S.pad - lw + GY__S.gap, bar.y + (bar.h - gy__lineh()) / 2, lockch, GY__T.text_dim);
             if (k == t->active && t->ntabs > 1) gy__rectf(tab, GY__T.button, (float)(3 * GY__S.line));
             gy__textxy(x + GY__S.pad, bar.y + (bar.h - gy__lineh()) / 2, tl->name, k == t->active ? (n == gy__c.tfocus ? GY__T.text : GY__T.text_dim) : GY__T.text_off);
             x += w + 2 * GY__S.line;
@@ -2978,7 +3168,9 @@ static void gy__tile_chrome(void) {
             }
             gy__c.layer = 0;
             if (gy__c.released[0]) {
-                if (gy__inside(mid, gy__c.mx, gy__c.my) && t->ntabs < GY__TABS) {
+                if (gy__inside(mid, gy__c.mx, gy__c.my) ? !gy__may(n, GY_LOCK_TABS | GY_LOCK_SPLIT) || ((gy__c.tl[gy__c.tdrag].lock | (gy__c.layout_lock ? GY_LOCK_ALL : 0)) & GY_LOCK_TABS && !gy__refuse(from))
+                                                        : !gy__may(from, GY_LOCK_MOVE) || !gy__may(n, GY_LOCK_MOVE)) {}   /* refused: nothing changes */
+                else if (gy__inside(mid, gy__c.mx, gy__c.my) && t->ntabs < GY__TABS) {
                     int d = gy__c.tdrag;
                     gy__tile_remove(d);
                     n = gy__tile_leaf(t->tabs[0]);
@@ -3019,7 +3211,7 @@ int gy_tile(const char *name) {
 }
 
 /* the layout as one line: H0.50(V0.40([Picker],[Preview|Log]*1),[Settings]) */
-static int gy__tsave(int n, char *b, int cap, int at) {
+GY__SMALL static int gy__tsave(int n, char *b, int cap, int at) {
     gy__tnode *t = &gy__c.tn[n];
     int k;
     char num[16];
@@ -3053,7 +3245,7 @@ GY__SMALL int gy_tiles_save(char *buf, int cap) {
     return 1;
 }
 
-static int gy__tload(const char **ps, int parent) {
+GY__SMALL static int gy__tload(const char **ps, int parent) {
     const char *s = *ps;
     int n = gy__tnode_new();
     if (n < 0) return -1;
@@ -3068,12 +3260,13 @@ static int gy__tload(const char **ps, int parent) {
             name[k] = 0;
             while (*s && *s != '|' && *s != ']') s++;
             t = gy__tile_add(name);
-            if (t >= 0 && gy__c.tn[n].ntabs < GY__TABS) { gy__c.tn[n].tabs[gy__c.tn[n].ntabs++] = t; gy__c.tl[t].from_load = 1; gy__c.tl[t].hidden = 0; }
+            if (t >= 0 && gy__c.tn[n].ntabs < GY__TABS && gy__tile_leaf(t) < 0) { gy__c.tn[n].tabs[gy__c.tn[n].ntabs++] = t; gy__c.tl[t].from_load = 1; gy__c.tl[t].hidden = 0; }   /* a tile once only */
             if (*s == '|') s++;
         }
         if (*s == ']') s++;
         if (*s == '*') { s++; gy__c.tn[n].active = *s >= '0' && *s <= '9' ? *s++ - '0' : 0; }
         if (gy__c.tn[n].active >= gy__c.tn[n].ntabs) gy__c.tn[n].active = 0;
+        if (!gy__c.tn[n].ntabs) return -1;     /* an empty stack: a broken line */
     } else if (*s == 'H' || *s == 'V') {
         int ok;
         const char *e;
@@ -3113,11 +3306,18 @@ GY__SMALL int gy_tiles_load(const char *line) {
     }
     gy__c.troot = r; gy__c.tfocus = gy__first_leaf(r);
     gy__c.tloaded = 1;
+    {   /* locks are never read from a line: every locked tile leaves the loaded tree and is placed again
+           by its rule, so a hand-edited line can't move, resize or stack it */
+        int t, moved[GY__TILEMAX], nm = 0;
+        for (t = 0; t < gy__c.ntl; t++)
+            if ((gy__c.tl[t].lock & (GY_LOCK_MOVE | GY_LOCK_SIZE | GY_LOCK_TABS | GY_LOCK_SPLIT)) && gy__tile_leaf(t) >= 0) { gy__tile_remove(t); moved[nm++] = t; }
+        for (t = 0; t < nm; t++) gy__tile_insert(moved[t]);
+    }
     return 1;
 }
 
-static const char *const gy__key_names[] = { "Left", "Right", "Up", "Down", "Plus", "Minus", "Enter", "Esc", "Space", "Tab", "Home", "End", "PgUp", "PgDn", "Delete" };
-static const int gy__key_codes[] = { GY_KEY_LEFT, GY_KEY_RIGHT, GY_KEY_UP, GY_KEY_DOWN, GY_KEY_PLUS, GY_KEY_MINUS, GY_KEY_ENTER, GY_KEY_ESC, GY_KEY_SPACE, GY_KEY_TAB, GY_KEY_HOME, GY_KEY_END, GY_KEY_PGUP, GY_KEY_PGDN, GY_KEY_DELETE };
+static const char *const gy__key_names[] = { "Left", "Right", "Up", "Down", "Plus", "Minus", "Enter", "Esc", "Space", "Tab", "Home", "End", "PgUp", "PgDn", "Delete", "Backspace" };
+static const int gy__key_codes[] = { GY_KEY_LEFT, GY_KEY_RIGHT, GY_KEY_UP, GY_KEY_DOWN, GY_KEY_PLUS, GY_KEY_MINUS, GY_KEY_ENTER, GY_KEY_ESC, GY_KEY_SPACE, GY_KEY_TAB, GY_KEY_HOME, GY_KEY_END, GY_KEY_PGUP, GY_KEY_PGDN, GY_KEY_DELETE, GY_KEY_BACK };
 
 /* "focus_left=Alt+Left;swap_left=Alt+Shift+Left;..." ("none" = off) */
 GY__SMALL int gy_tile_keys_save(char *buf, int cap) {
@@ -3258,6 +3458,7 @@ void gy_begin(void) {
     gy__c.resize_w = gy__c.resize_h = 0;
     if (gy__c.attached && gy__c.passes > 0) gy__c.passes--;   /* an app's own loop: this frame is one of the asked-for passes */
     gy__zoom_keys();
+    if (gy__c.fit_want > 0 && gy__c.fit_want != gy__c.fitz) { gy__c.fitz = gy__c.fit_want; gy__scale_apply(); }   /* locks: too small */
     gy__c.ktabbed = 0;
     gy__c.nkf_prev = gy__c.nkf;
     if (gy__c.nkf) {                           /* Tab / Shift+Tab: the next or previous widget of last frame */
@@ -3692,6 +3893,15 @@ void gy_end(void) {
     if (!gy__c.ready || !gy__c.px) return;
     while (gy__c.nlay > 1) gy__c.nlay--;       /* containers the app left open */
     if (gy__c.cut_tip_id && !gy__c.down[0]) gy__tip_draw(gy__c.cut_tip_id, gy__c.cut_tip);   /* a cut label's whole text */
+    if (gy__c.lock_msg[0] && gy__c.now - gy__c.lock_t >= 2000) gy__c.lock_msg[0] = 0;
+    if (gy__c.lock_msg[0] || (gy__c.giveway > 0 && gy__c.giveway < 1)) {   /* "Locked: <name>" for 2 s; the gold note while sizes give way */
+        const char *m = gy__c.lock_msg[0] ? gy__c.lock_msg : "The window is too small: the locked sizes give way until it grows";
+        int w = gy__text_w(m, NULL) + 2 * GY__S.pad, h = gy__lineh() + 2 * GY__S.inset, x = (gy__c.w - w) / 2;
+        gy__c.layer = 2;
+        gy__box((gy__ir){ x, GY__S.pad, w, h }, GY__T.tip, gy__c.lock_msg[0] ? GY__T.accent : GY__T.warn, (float)GY__S.radius, (float)GY__S.line);
+        gy__textxy(x + GY__S.pad, GY__S.pad + GY__S.inset, m, gy__c.lock_msg[0] ? GY__T.text : GY__T.warn);
+        gy__c.layer = 0;
+    }
     if (gy__c.banner[0]) {                     /* an error banner, on the top layer */
         int h = gy__lineh() + 2 * GY__S.inset;
         gy__c.layer = 2;
@@ -3896,8 +4106,13 @@ GY__SMALL static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mm = (MINMAXINFO *)lp;
-        RECT r = { 0, 0, gy__c.min_w, gy__c.min_h };
-        if (!gy__c.min_w) return 0;
+        RECT r = { 0, 0, gy__maxi(gy__c.min_w, gy__c.lmin_w), gy__maxi(gy__c.min_h, gy__c.lmin_h) };
+        MONITORINFO mi;
+        if (!r.right && !r.bottom) return 0;
+        mi.cbSize = sizeof mi;
+        if (gy__os.monitor_info(MonitorFromWindow(hw, MONITOR_DEFAULTTONEAREST), &mi)) {   /* never bigger than the work area */
+            r.right = gy__mini(r.right, mi.rcWork.right - mi.rcWork.left - 16); r.bottom = gy__mini(r.bottom, mi.rcWork.bottom - mi.rcWork.top - 40);
+        }
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         mm->ptMinTrackSize.x = r.right - r.left; mm->ptMinTrackSize.y = r.bottom - r.top;
         return 1;

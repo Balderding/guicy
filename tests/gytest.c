@@ -134,6 +134,7 @@ static HWND g_win_to_destroy;                  /* a test's own app window, close
 #include "d1_tests.inc"
 #include "x1_tests.inc"
 #include "a1_tests.inc"
+#include "l1_tests.inc"
 
 /* the default theme before 2026-11-23 (teal), kept only for --old-theme */
 static const gy_theme g_old_theme = {
@@ -209,6 +210,14 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "a1_cut", t_a1_cut },
     { "a1_scroll_canvas", t_a1_scroll_canvas },
     { "a1_wheel", t_a1_wheel },
+    { "l1_flags", t_l1_flags },
+    { "l1_size_resize", t_l1_size_resize },
+    { "l1_layout_lock", t_l1_layout_lock },
+    { "l1_hostile_load", t_l1_hostile_load },
+    { "l1_reset", t_l1_reset },
+    { "l1_too_small", t_l1_too_small },
+    { "l1_split_lock", t_l1_split_lock },
+    { "l1_fuzz", t_l1_fuzz },
     { "w_ime", t_w_ime },
     { "w_app_msgs", t_w_app_msgs },
     { "x1_no_font", t_x1_no_font },

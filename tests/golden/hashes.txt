@@ -64,3 +64,11 @@ a1_cut 0c6864051e2cc8e1
 w_app_msgs 757184619cca2e76
 a1_scroll_canvas 2fa0a3c448c86169
 a1_wheel 4a4763fff452cc83
+l1_flags 9af9b8d95be3e03d
+l1_size_resize 3c3a5e8a6c357757
+l1_layout_lock c45f3ccd29e175a3
+l1_hostile_load b5ffeb9b2f63545d
+l1_reset b5ffeb9b2f63545d
+l1_too_small 275a9f4c6cd3dd0f
+l1_split_lock feaa45939f15cb50
+l1_fuzz 9af9b8d95be3e03d
