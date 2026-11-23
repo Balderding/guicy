@@ -462,8 +462,22 @@ typedef struct gy__os_t {
     DWORD (WINAPI *glyph_outline)(HDC, UINT, UINT, LPGLYPHMETRICS, DWORD, LPVOID, const MAT2 *);
     BOOL (WINAPI *text_metrics)(HDC, LPTEXTMETRICW);
     DWORD (WINAPI *ticks)(void);
+    BOOL (WINAPI *monitor_info)(HMONITOR, LPMONITORINFO);
+    UINT (*monitor_dpi)(HMONITOR);             /* GetDpiForMonitor (shcore, loaded at run time), or 96 */
 } gy__os_t;
-static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount };
+static UINT gy__dpi_of_monitor(HMONITOR m);
+static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, gy__dpi_of_monitor };
+
+/* the monitor's DPI through shcore's GetDpiForMonitor when Windows has it (8.1 and later) */
+static UINT gy__dpi_of_monitor(HMONITOR m) {
+    typedef HRESULT (WINAPI *fn_t)(HMONITOR, int, UINT *, UINT *);
+    static fn_t fn;
+    static int tried;
+    UINT x = 96, y = 96;
+    if (!tried) { HMODULE h = LoadLibraryA("shcore.dll"); fn = h ? (fn_t)(void *)GetProcAddress(h, "GetDpiForMonitor") : NULL; tried = 1; }
+    if (fn && m && SUCCEEDED(fn(m, 0, &x, &y))) return x;   /* MDT_EFFECTIVE_DPI */
+    return 96;
+}
 
 /* the theme's sizes in whole device pixels at the current scale */
 typedef struct gy__sizes {
@@ -1102,7 +1116,33 @@ static void gy__scale_apply(void) {
     gy__c.want_full = 1;
 }
 
-void gy_scale_mode(int mode) { if (gy__init()) { gy__c.scale_mode = mode; gy__scale_apply(); } }
+/* the monitor factor: max(DPI / 96, the shorter side / 1080) by default, or DPI / 96 only, in
+   25 % steps (an exact half rounds up). A portrait screen counts its shorter side. */
+static float gy__factor_of(UINT dpi, int w, int h, int mode) {
+    float f = (float)dpi / 96.0f, r = (float)(w < h ? w : h) / 1080.0f, q;
+    if (mode == GY_SCALE_DPI_AND_RESOLUTION && r > f) f = r;
+    q = f * 4.0f + 0.5f;
+    f = (float)(int)q / 4.0f;
+    return f < 1.0f ? 1.0f : f;                /* never smaller than 100 % */
+}
+
+static float gy__monitor_factor(HMONITOR m, RECT *work) {
+    MONITORINFO mi;
+    mi.cbSize = sizeof mi;
+    if (!m || !gy__os.monitor_info(m, &mi)) { if (work) SetRect(work, 0, 0, 1920, 1080); return 1.0f; }
+    if (work) *work = mi.rcWork;
+    return gy__factor_of(gy__os.monitor_dpi(m), mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, gy__c.scale_mode);
+}
+
+/* the window moved or the screen changed: the factor of the monitor it is on now */
+static void gy__monitor_update(void) {
+    float f;
+    if (!gy__c.hwnd || gy__c.scale_mode == GY_SCALE_FIXED) return;
+    f = gy__monitor_factor(MonitorFromWindow(gy__c.hwnd, MONITOR_DEFAULTTONEAREST), NULL);
+    if (f != gy__c.mon_factor) { gy__c.mon_factor = f; gy__scale_apply(); gy__c.passes = gy__maxi(gy__c.passes, 2); }
+}
+
+void gy_scale_mode(int mode) { if (gy__init()) { gy__c.scale_mode = mode; gy__monitor_update(); gy__scale_apply(); } }
 void gy_scale_set(float f) { if (gy__init() && f > 0) { gy__c.scale_fixed = f; gy__c.scale_mode = GY_SCALE_FIXED; gy__scale_apply(); } }
 float gy_scale(void) { return gy__init() ? gy__c.scale : 1.0f; }
 void gy_font_size(int px) { if (gy__init()) { gy__c.user_font = px > 0 ? px : 0; gy__scale_apply(); } }
@@ -3442,6 +3482,35 @@ static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
         return 1;
     }
     case WM_APP + 1: gy__c.passes = gy__maxi(gy__c.passes, 1); return 1;   /* gy_wake */
+    case 0x02E0: {                             /* WM_DPICHANGED: take Windows' suggested rect at once */
+        const RECT *nr = (const RECT *)lp;
+        if (gy__c.scale_mode != GY_SCALE_FIXED) {
+            gy__c.mon_factor = gy__factor_of(LOWORD(wp), 0, 0, GY_SCALE_DPI_ONLY);
+            {   /* and the resolution term of the monitor it lands on */
+                MONITORINFO mi; HMONITOR m = MonitorFromRect(nr, MONITOR_DEFAULTTONEAREST);
+                mi.cbSize = sizeof mi;
+                if (m && gy__os.monitor_info(m, &mi))
+                    gy__c.mon_factor = gy__factor_of(LOWORD(wp), mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, gy__c.scale_mode);
+            }
+            gy__scale_apply();
+        }
+        SetWindowPos(hw, NULL, nr->left, nr->top, nr->right - nr->left, nr->bottom - nr->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        gy__c.passes = 2;
+        return 1;
+    }
+    case WM_EXITSIZEMOVE: case WM_DISPLAYCHANGE: {   /* a same-DPI monitor with another size: only when the move ends */
+        float old = gy__c.scale;
+        RECT wr, cr;
+        gy__monitor_update();
+        if (gy__c.scale != old && old > 0 && GetWindowRect(hw, &wr) && GetClientRect(hw, &cr)) {
+            /* the same DIP size at the new scale, around the same centre, so it can't bounce */
+            int cw = (int)((float)cr.right * gy__c.scale / old + 0.5f), ch = (int)((float)cr.bottom * gy__c.scale / old + 0.5f);
+            int fw = (wr.right - wr.left) - cr.right + cw, fh = (wr.bottom - wr.top) - cr.bottom + ch;
+            int cx = (wr.left + wr.right) / 2, cy = (wr.top + wr.bottom) / 2;
+            SetWindowPos(hw, NULL, cx - fw / 2, cy - fh / 2, fw, fh, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
     }
     return 0;
 }
@@ -3473,6 +3542,7 @@ int gy_attach(void *hwnd) {
     gy__c.memdc = CreateCompatibleDC(NULL);
     if (!gy__c.memdc || !gy__dib(gy__maxi(r.right, 1), gy__maxi(r.bottom, 1))) return 0;
     gy__c.hwnd = (HWND)hwnd; gy__c.attached = 1;
+    gy__monitor_update();
     gy__c.passes = 2;
     return 1;
 }
@@ -3496,14 +3566,31 @@ int gy_open(const gy_desc *d) {
     wc.style = CS_DBLCLKS;
     RegisterClassExW(&wc);
     if (!MultiByteToWideChar(CP_UTF8, 0, d->title ? d->title : "GUICy", -1, title, 256)) title[0] = 0;
-    gy__c.min_w = d->min_w; gy__c.min_h = d->min_h;
-    r.left = 0; r.top = 0; r.right = d->w > 0 ? d->w : 900; r.bottom = d->h > 0 ? d->h : 600;
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    gy__c.memdc = CreateCompatibleDC(NULL);
-    if (!gy__c.memdc || !gy__dib(d->w > 0 ? d->w : 900, d->h > 0 ? d->h : 600)) return 0;
+    {   /* per-monitor DPI v2 for GUICy's window, unless the app chose its own awareness */
+        typedef void *(WINAPI *set_t)(void *);
+        set_t set = (set_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext");
+        if (set) set((void *)(intptr_t)-4);    /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */
+    }
+    {   /* the size in DIPs at the factor of the monitor it opens on, never bigger than the work area */
+        RECT work;
+        POINT pt = { 0, 0 };
+        int cw, ch;
+        if (gy__c.scale_mode != GY_SCALE_FIXED) gy__c.mon_factor = gy__monitor_factor(MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY), &work);
+        else SetRect(&work, 0, 0, 16384, 16384);
+        gy__scale_apply();
+        cw = (int)((float)(d->w > 0 ? d->w : 900) * gy__c.scale + 0.5f); ch = (int)((float)(d->h > 0 ? d->h : 600) * gy__c.scale + 0.5f);
+        r.left = 0; r.top = 0; r.right = cw; r.bottom = ch;
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        if (r.right - r.left > work.right - work.left) { cw -= (r.right - r.left) - (work.right - work.left); r.right = r.left + (work.right - work.left); }
+        if (r.bottom - r.top > work.bottom - work.top) { ch -= (r.bottom - r.top) - (work.bottom - work.top); r.bottom = r.top + (work.bottom - work.top); }
+        gy__c.min_w = (int)((float)d->min_w * gy__c.scale + 0.5f); gy__c.min_h = (int)((float)d->min_h * gy__c.scale + 0.5f);
+        gy__c.memdc = CreateCompatibleDC(NULL);
+        if (!gy__c.memdc || !gy__dib(cw, ch)) return 0;
+    }
     gy__c.hwnd = CreateWindowExW(0, L"GUICy", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
     if (!gy__c.hwnd) { gy__set_error("GUICy could not make its window", "CreateWindowExW failed"); return 0; }
+    gy__monitor_update();                      /* the monitor it really opened on */
     ShowWindow(gy__c.hwnd, SW_SHOWDEFAULT);
     gy__c.passes = 2;
     return 1;

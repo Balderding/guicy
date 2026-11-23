@@ -161,3 +161,71 @@ static int t_d1_zoom(void) {
     gy_input_mouse(-100, -100); frames(v_scene, 2);
     return 1;
 }
+
+/* monitors: the factor rule, and the user's own case (two 125 % monitors: nothing happens) */
+static RECT stub_mon, stub_work;
+static UINT stub_dpi = 96;
+static BOOL WINAPI stub_monitor_info(HMONITOR m, LPMONITORINFO mi) { (void)m; mi->rcMonitor = stub_mon; mi->rcWork = stub_work; mi->dwFlags = 1; return TRUE; }
+static UINT stub_monitor_dpi(HMONITOR m) { (void)m; return stub_dpi; }
+static void stub_monitor(int w, int h, UINT dpi) { SetRect(&stub_mon, 0, 0, w, h); SetRect(&stub_work, 0, 0, w, h - 40); stub_dpi = dpi; gy__os.monitor_info = stub_monitor_info; gy__os.monitor_dpi = stub_monitor_dpi; }
+static gy__os_t real_os;
+static void stub_off(void) { gy__os.monitor_info = real_os.monitor_info; gy__os.monitor_dpi = real_os.monitor_dpi; }
+
+static int t_d1_monitors(void) {
+    static const struct { UINT dpi; int w, h, mode; float want; } c[] = {
+        { 96, 3840, 2160, GY_SCALE_DPI_AND_RESOLUTION, 2.0f }, { 96, 2560, 1440, GY_SCALE_DPI_AND_RESOLUTION, 1.25f },
+        { 96, 1440, 2560, GY_SCALE_DPI_AND_RESOLUTION, 1.25f }, { 144, 1920, 1080, GY_SCALE_DPI_AND_RESOLUTION, 1.5f },
+        { 96, 1920, 1080, GY_SCALE_DPI_AND_RESOLUTION, 1.0f }, { 96, 2560, 1440, GY_SCALE_DPI_ONLY, 1.0f },
+        { 120, 1920, 1080, GY_SCALE_DPI_ONLY, 1.25f }, { 96, 3840, 2160, GY_SCALE_DPI_ONLY, 1.0f } };
+    int i;
+    for (i = 0; i < (int)(sizeof c / sizeof c[0]); i++) {
+        float f = gy__factor_of(c[i].dpi, c[i].w, c[i].h, c[i].mode);
+        CHECK(f == c[i].want, "%ux%u at %u DPI (mode %d) gave %.2f, want %.2f", c[i].w, c[i].h, c[i].dpi, c[i].mode, (double)f, (double)c[i].want);
+    }
+    if (!open_at(320, 200)) return 0;
+    LOG("factors: 4K/96 200, 1440p/96 125, portrait 1440x2560/96 125, 1080p/144 150, DPI only 1440p/96 100; ");
+    return 1;
+}
+
+/* windowed: WM_DPICHANGED takes Windows' rect at once; a same-DPI 4K monitor settles on WM_EXITSIZEMOVE
+   after one switch; the user's two monitors (both 125 %) change nothing; a 1540 DIP window on the
+   portrait monitor opens inside the work area */
+static int t_w_dpi(void) {
+    RECT rc, nr;
+    float s0;
+    real_os = gy__os;
+    stub_monitor(2560, 1440, 96);              /* the user's main monitor */
+    if (!gy_open(&(gy_desc){ .title = "gytest w_dpi", .w = 420, .h = 200 })) { stub_off(); LOG("gy_open: %s; ", gy_last_error()); return 0; }
+    s0 = gy_scale();
+    CHECK(s0 == 1.25f && gy_width() == 525 && gy_height() == 250, "on the 1440p monitor: scale %.2f, %dx%d (want 1.25, 525x250)", (double)s0, gy_width(), gy_height());
+    /* the user's case: the portrait monitor, also 125 %: nothing changes */
+    stub_monitor(1440, 2560, 96);
+    SendMessageW(gy__c.hwnd, WM_EXITSIZEMOVE, 0, 0);
+    CHECK(gy_scale() == s0, "moving to the user's other monitor changed the scale to %.2f", (double)gy_scale());
+    /* WM_DPICHANGED 96 -> 144 -> 120: the suggested rect is taken at once */
+    SetRect(&nr, 100, 100, 100 + 700, 100 + 400);
+    SendMessageW(gy__c.hwnd, 0x02E0, MAKEWPARAM(144, 144), (LPARAM)&nr);
+    GetWindowRect(gy__c.hwnd, &rc);
+    CHECK(gy_scale() == 1.5f && rc.left == nr.left && rc.right == nr.right && rc.bottom == nr.bottom, "144 DPI: scale %.2f, window %ld,%ld-%ld,%ld", (double)gy_scale(), rc.left, rc.top, rc.right, rc.bottom);
+    SetRect(&nr, 120, 120, 120 + 600, 120 + 340);
+    SendMessageW(gy__c.hwnd, 0x02E0, MAKEWPARAM(120, 120), (LPARAM)&nr);
+    GetWindowRect(gy__c.hwnd, &rc);
+    CHECK(gy_scale() == 1.25f && rc.right == nr.right, "120 DPI: scale %.2f", (double)gy_scale());
+    /* a 4K monitor at 96 DPI: no WM_DPICHANGED, the switch waits for the end of the move, once */
+    stub_monitor(3840, 2160, 96);
+    SendMessageW(gy__c.hwnd, WM_EXITSIZEMOVE, 0, 0);
+    CHECK(gy_scale() == 2.0f, "4K at 96 DPI: scale %.2f after the move ended", (double)gy_scale());
+    GetWindowRect(gy__c.hwnd, &rc);
+    SendMessageW(gy__c.hwnd, WM_EXITSIZEMOVE, 0, 0);
+    { RECT r2; GetWindowRect(gy__c.hwnd, &r2); CHECK(r2.left == rc.left && r2.right == rc.right, "a second end-of-move resized it again"); }
+    gy_shutdown();
+    /* the portrait monitor: a 1540 DIP window opens inside the work area */
+    stub_monitor(1440, 2560, 96);
+    if (!gy_open(&(gy_desc){ .title = "gytest w_dpi 2", .w = 1540, .h = 400 })) { stub_off(); return 0; }
+    GetWindowRect(gy__c.hwnd, &rc);
+    LOG("portrait: window %ld px wide on a 1440 px work area; ", rc.right - rc.left);
+    CHECK(rc.right - rc.left <= 1440, "a 1540 DIP window opened %ld px wide on the 1440 px portrait monitor", rc.right - rc.left);
+    stub_off();
+    gy_begin(); gy_text("w_dpi"); gy_end();
+    return 1;
+}

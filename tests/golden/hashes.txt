@@ -44,3 +44,5 @@ d1_look_150 69ec8709348de2f5
 d1_look_200 7323fbf72981f408
 d1_seams 47e9eb6040dc4681
 d1_zoom 1b1babfe13bac0c3
+d1_monitors 36d13322db2eb963
+w_dpi 692830093a6ad0b5

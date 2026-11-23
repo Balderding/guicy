@@ -179,8 +179,10 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "d1_look_200", t_d1_look_200 },
     { "d1_seams", t_d1_seams },
     { "d1_zoom", t_d1_zoom },
+    { "d1_monitors", t_d1_monitors },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
+    { "w_dpi", t_w_dpi },
 };
 #define NTESTS ((int)(sizeof TESTS / sizeof TESTS[0]))
 

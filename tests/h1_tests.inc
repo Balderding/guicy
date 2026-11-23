@@ -186,6 +186,7 @@ static int t_w_attach(void) {
     gy_shutdown();
     h = w_app_window(420, 200);
     CHECK(h != NULL, "no app window");
+    gy_scale_set(1);                           /* compared with off screen at 100 %: not the monitor's factor */
     if (!gy_attach(h)) { LOG("gy_attach: %s; ", gy_last_error()); DestroyWindow(h); return 0; }
     gy_isa_set(g_isa);
     w_chk = 0;
@@ -207,6 +208,7 @@ static int t_w_open(void) {
     uint64_t ih0, ph0, ih, ph;
     int i, frames_run = 0;
     if (!w_offscreen(&ih0, &ph0)) return 0;
+    gy_scale_set(1);                           /* compared with off screen at 100 % */
     if (!gy_open(&(gy_desc){ .title = "gytest w_open", .w = 420, .h = 200 })) { LOG("gy_open: %s; ", gy_last_error()); return 0; }
     gy_isa_set(g_isa);
     w_chk = 0;
