@@ -362,7 +362,30 @@ A1 is milestone M3; A2 and A3 together are M4.
 
 ## 6. After the ports
 
-### G1. The GPU path, opt-in (default contender only if G0 allowed it)
+### G1. The GPU for the tasks it is better at (hybrid, per task)
+
+**The user's rule (2026-11-23):** "we can use the GPU for what it is good at / if the GPU is better
+then use it for the task". This replaces the earlier all-or-nothing rule ("the GPU is the default
+only if it wins every case"). Each kind of work goes to whichever path measures faster on this
+machine; no path is chosen by guess.
+
+- **Small changes** (hover, caret, typing, one widget): CPU dirty tiles, as now (G0: 0.013 ms).
+- **Big changes** (resize, scroll, zoom, theme switch, animation, more than half the tiles dirty):
+  the GPU draws the whole frame from the same instance list (G0: 0.124 ms CPU side vs 0.385 ms).
+- **Heavy single jobs:** large image scaling/smoothing and the zoom stretch preview (O1) on the GPU.
+- **No GPU, RDP, WARP/Basic Render, or any failure:** everything on the CPU, as today.
+
+**Two ways to share one window (the race picks, per machine):**
+- **Mode P, GPU presents:** the flip chain shows every frame; a small frame is drawn by the CPU and
+  only its dirty tiles go up by `UpdateSubresource` into the back buffer copy, a big frame is drawn
+  on the GPU. Cost: a present on small frames too.
+- **Mode C, CPU keeps the screen:** GDI BitBlt stays the only presenter; the GPU only does heavy
+  off-screen jobs (image scaling, big redraws read back into the DIB) where the readback still wins.
+- **The chooser:** a cost per frame class (small / big / image job) kept as a running median of the
+  measured CPU-side time of both paths (each path re-timed on 1 frame in 64 of its class, never on
+  idle); a class switches path only after the other wins by more than the spread for 8 frames in a
+  row (no flapping). `GUICY_RENDER=cpu|gpu|hybrid` and `gy_desc.render` override;
+  `gy_renderer_name()` and the log say which path each class uses and why.
 
 Deliverable:
 - **Drawing:** D3D11 FL 11.0 loaded at run time; one `DrawInstanced(4, n)` over the same 48-byte
@@ -401,17 +424,21 @@ Proof:
   path, ending on the CPU golden.
 - **Counts:** with `GUICY_RENDER=gpu` the GPU draws as many frames as the CPU path for the same
   script; idle is 0 frames and 0 presents over 60 s.
-- **The race, only if G0 allowed a GPU default:** a real window per path on the test desktop at
+- **Hybrid never loses:** for every case below, hybrid's time is within the spread of, or better
+  than, the better single path (CPU only, GPU only); idle stays 0 frames and 0 presents over 60 s; a
+  scripted mix (typing, then a resize, then typing) shows the class switches in the log.
+- **The race:** a real window per path on the test desktop at
   1540x950, 1080p and 1440p (exact client size by a hook, work area stubbed larger). The CPU side of
   each frame is timed with `QueryThreadCycleTime` from taking the input to the return of the present
   call, the GPU side by timestamps; **9 or more runs**, other CPU and GPU load logged. Per case and
-  path it records the presents that returned OCCLUDED and the present call's own time. The user's
-  rule: the GPU is the default only if it wins **every case once running** (hover, caret, typing,
-  slider, progress, scroll, resize, full redraw, tile focus, tile drag). A tie (inside the spread)
-  loses; **a case whose winner flips between runs counts as a CPU win**; a win smaller than the
-  present-call time is not proven and loses until visible race A confirms it. First frame and start
-  to window are reported, not decided on.
-Budgets: +20 KB; GPU-path frame CPU side 0.5 ms for 5,000 glyphs and 500 rects (reported).
+  path it records the presents that returned OCCLUDED and the present call's own time. Cases: hover,
+  caret, typing, slider, progress, scroll, resize, full redraw, zoom, tile focus, tile drag, a large
+  image scaled. **Per case** the faster path takes that case (the user's hybrid rule); a tie (inside
+  the spread) stays on the CPU; a case whose winner flips between runs stays on the CPU; a GPU win
+  smaller than the present-call time is not proven and stays on the CPU until visible race A
+  confirms it. Mode P vs mode C is decided the same way, on the whole set. First frame and start to
+  window are reported, not decided on.
+Budgets: +20 KB (the chooser inside it, about 1 KB; the 125 kB core cap holds); GPU-path frame CPU side 0.5 ms for 5,000 glyphs and 500 rects (reported).
 
 ### G2, T1, P1: containers, drop zones and panel docks (default parts). Milestone M5
 
