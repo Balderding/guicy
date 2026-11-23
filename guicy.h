@@ -472,6 +472,7 @@ typedef struct gy__ctx {
 
     /* text */
     HDC dc;
+    HFONT dc_font;                             /* the font selected into dc now */
     gy__font fonts[GY__MAX_FONTS];
     int nfonts, font;
     gy__glyph *glyphs;
@@ -695,6 +696,7 @@ GY__AVX2 static void gy__row_avx2(uint32_t *d, const uint32_t *s, int n) {
 }
 GY__AVX2 static void gy__glyph_avx2(uint32_t *d, const unsigned char *cov, int n, uint32_t col) {
     int i = 0;
+    if (n < 16) { gy__glyph_sse2(d, cov, n, col); return; }   /* short glyph rows: SSE2 is faster (stress.md) */
     __m256i z = _mm256_setzero_si256();
     __m256i c16 = _mm256_unpacklo_epi8(_mm256_set1_epi32((int)col), z);
     for (; i + 8 <= n; i += 8) {
@@ -965,6 +967,7 @@ static int gy__font_make(const char *face, int px, int bold) {
                         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, wface);
     if (!f->hf) { gy__set_error("gy_font_add could not make the font", face); return -1; }
     SelectObject(gy__c.dc, f->hf);
+    gy__c.dc_font = f->hf;
     GetTextMetricsW(gy__c.dc, &tm);
     f->px = px; f->ascent = tm.tmAscent; f->descent = tm.tmDescent; f->height = tm.tmHeight;
     return gy__c.nfonts++;
@@ -1014,7 +1017,9 @@ static gy__glyph *gy__glyph_get(int font, uint32_t cp) {
     if (g->key == key) return g;
     gy__c.glyph_misses++;
     g->key = key;
-    SelectObject(gy__c.dc, gy__c.fonts[font].hf);
+    if (gy__c.dc_font != gy__c.fonts[font].hf) { SelectObject(gy__c.dc, gy__c.fonts[font].hf); gy__c.dc_font = gy__c.fonts[font].hf; }
+    /* two calls: the size, then the bitmap. (One call with a 1 MB buffer was tried in F1: GDI then
+       takes 11 times as long and returns different pixels, so the size query stays.) */
     need = GetGlyphOutlineW(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, 0, NULL, &ident);
     if (need == GDI_ERROR) { gy__memset(&gm, 0, sizeof gm); need = 0; }
     g->adv = (int16_t)gm.gmCellIncX;
