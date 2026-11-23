@@ -55,7 +55,7 @@ typedef struct gy_theme {
     gy_color button;      /* a button at rest */
     gy_color button_hot;  /* under the mouse */
     gy_color button_down; /* pressed */
-    gy_color accent;      /* the chosen / primary thing (teal) */
+    gy_color accent;      /* the chosen / primary thing (green, with dark text on it) */
     gy_color accent_hot;
     gy_color accent_text; /* text on the accent */
     gy_color field;       /* edit boxes, slider tracks, check boxes */
@@ -660,22 +660,33 @@ static gy__ctx gy__c;
 #define GY__L (gy__c.lay[gy__c.nlay - 1])
 
 static const gy_theme gy__theme_dark = {
-    /* bg          panel         card          border        text          text_dim      text_off */
-    GY_RGB(30,31,34), GY_RGB(40,41,45), GY_RGB(50,52,57), GY_RGB(64,66,72), GY_RGB(224,226,230), GY_RGB(160,164,172), GY_RGB(100,103,110),
+    /* bg          panel         card          border        text          text_dim      text_off
+       (no teal, at the user's word: buttons clearly lighter than the panel, with a border you can see) */
+    GY_RGB(28,30,34), GY_RGB(36,39,45), GY_RGB(48,52,60), GY_RGB(110,116,130), GY_RGB(226,228,232), GY_RGB(168,172,182), GY_RGB(104,108,118),
     /* heading     button        button_hot    button_down */
-    GY_RGB(230,190,90), GY_RGB(56,58,64), GY_RGB(70,73,80), GY_RGB(44,46,51),
-    /* accent      accent_hot    accent_text */
-    GY_RGB(0,150,150), GY_RGB(0,175,175), GY_RGB(255,255,255),
-    /* field       field_hot     select        good          warn          bad */
-    GY_RGB(24,25,28), GY_RGB(32,33,37), GY_RGB(0,95,110), GY_RGB(90,190,110), GY_RGB(230,190,90), GY_RGB(120,120,220),
+    GY_RGB(230,190,90), GY_RGB(70,75,86), GY_RGB(92,98,112), GY_RGB(54,58,66),
+    /* accent      accent_hot    accent_text (green, dark text on it: 8 : 1) */
+    GY_RGB(104,196,112), GY_RGB(132,214,138), GY_RGB(14,22,14),
+    /* field       field_hot     select (navy)  good          warn          bad */
+    GY_RGB(22,24,28), GY_RGB(30,33,38), GY_RGB(46,74,128), GY_RGB(90,190,110), GY_RGB(230,190,90), GY_RGB(140,130,230),
     /* divider     divider_hot   tip           shadow (black, 40 % alpha, premultiplied) */
-    GY_RGB(52,54,59), GY_RGB(0,150,150), GY_RGB(58,60,66), 0x66000000u,
+    GY_RGB(60,64,72), GY_RGB(104,196,112), GY_RGB(60,64,74), 0x66000000u,
     /* sizes in em of the 15 px font: pad 8, gap 6, row 28, radius 4, check 16, scroll 10, split 6,
        title 24, tile 160 x 110, track 6, knob 12, number buttons 22, inset 6 (all at 15 px) */
     8.0f / 15, 6.0f / 15, 28.0f / 15, 4.0f / 15, 16.0f / 15, 10.0f / 15, 6.0f / 15,
     24.0f / 15, 160.0f / 15, 110.0f / 15, 6.0f / 15, 12.0f / 15, 22.0f / 15, 6.0f / 15,
     15,
 };
+
+#ifdef GUICY_TESTS
+#define GY__FLAT_TEST || gy__test_flat_select
+#else
+#define GY__FLAT_TEST
+#endif
+#ifdef GUICY_TESTS
+static const gy_theme *gy__test_theme;          /* gytest --old-theme: each context starts with this theme */
+static int gy__test_flat_select;                /* and with choices drawn flat, as before 2026-11-23 */
+#endif
 
 static int gy__px(float em) {                  /* an em size to whole device pixels at the current scale */
     float v = em * (float)gy__c.theme.font_px * gy__c.scale + 0.5f;
@@ -924,6 +935,9 @@ GY__SMALL static int gy__init(void) {
         gy__set_error("GUICy could not reserve its memory", NULL); return 0;
     }
     gy__c.theme = gy__theme_dark;
+#ifdef GUICY_TESTS
+    if (gy__test_theme) gy__c.theme = *gy__test_theme;
+#endif
     gy__c.glyphs = (gy__glyph *)gy__arena_push(&gy__c.perm, sizeof(gy__glyph) * GY__GLYPH_SLOTS);
     gy__c.scratch = (unsigned char *)gy__arena_push(&gy__c.perm, 1 << 20);
     gy__c.dc = CreateCompatibleDC(NULL);
@@ -1910,10 +1924,12 @@ int gy_select(const char *label, int on) {
     uint32_t id = gy__id(label);
     int hot, held, clicked = gy__button_logic(id, r, &hot, &held);
     gy_color bg;
+    int flat = gy__c.layer > 0 GY__FLAT_TEST, room = r.w - 2 * GY__S.gap, tw = gy__text_w(label, end);   /* flat: a row of a popup list */
     if (gy__kfocus(id, r)) clicked = 1;
-    bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : 0;
-    if (bg) gy__rectf(r, bg, (float)GY__S.radius);
-    gy__label_cut(r.x + GY__S.gap, gy__text_y(r), r.w - 2 * GY__S.gap, label, end,
+    bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : flat ? 0 : GY__T.button;
+    if (flat) { if (bg) gy__rectf(r, bg, (float)GY__S.radius); }
+    else gy__box(r, bg, on ? (gy__c.disabled ? GY__T.text_off : GY__T.text) : hot ? GY__T.accent : GY__T.border, (float)GY__S.radius, (float)(on ? 2 * GY__S.line : GY__S.line));   /* chosen: more than a colour, a thick light edge */
+    gy__label_cut(flat || tw > room ? r.x + GY__S.gap : r.x + (r.w - tw) / 2, gy__text_y(r), room, label, end,
                   gy__c.disabled ? GY__T.text_off : on ? GY__T.accent_text : GY__T.text, r, id);
     return clicked;
 }
@@ -2956,7 +2972,10 @@ static void gy__tile_chrome(void) {
             if (!t->used || !t->leaf || n == from || !gy__inside(t->r, gy__c.mx, gy__c.my)) continue;
             mid.x = t->r.x + t->r.w * 3 / 10; mid.y = t->r.y + t->r.h * 3 / 10; mid.w = t->r.w * 4 / 10; mid.h = t->r.h * 4 / 10;
             gy__c.layer = 2;
-            gy__box(gy__inside(mid, gy__c.mx, gy__c.my) ? mid : t->r, 0x40009696u, GY__T.accent, (float)GY__S.radius, (float)(2 * GY__S.line));
+            {   uint32_t ac = GY__T.accent;     /* the accent at a quarter, premultiplied */
+                gy_color tint = 0x40000000u | gy__div255(((ac >> 16) & 255) * 64) << 16 | gy__div255(((ac >> 8) & 255) * 64) << 8 | gy__div255((ac & 255) * 64);
+                gy__box(gy__inside(mid, gy__c.mx, gy__c.my) ? mid : t->r, tint, GY__T.accent, (float)GY__S.radius, (float)(2 * GY__S.line));
+            }
             gy__c.layer = 0;
             if (gy__c.released[0]) {
                 if (gy__inside(mid, gy__c.mx, gy__c.my) && t->ntabs < GY__TABS) {

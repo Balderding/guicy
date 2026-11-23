@@ -135,6 +135,18 @@ static HWND g_win_to_destroy;                  /* a test's own app window, close
 #include "x1_tests.inc"
 #include "a1_tests.inc"
 
+/* the default theme before 2026-11-23 (teal), kept only for --old-theme */
+static const gy_theme g_old_theme = {
+    GY_RGB(30,31,34), GY_RGB(40,41,45), GY_RGB(50,52,57), GY_RGB(64,66,72), GY_RGB(224,226,230), GY_RGB(160,164,172), GY_RGB(100,103,110),
+    GY_RGB(230,190,90), GY_RGB(56,58,64), GY_RGB(70,73,80), GY_RGB(44,46,51),
+    GY_RGB(0,150,150), GY_RGB(0,175,175), GY_RGB(255,255,255),
+    GY_RGB(24,25,28), GY_RGB(32,33,37), GY_RGB(0,95,110), GY_RGB(90,190,110), GY_RGB(230,190,90), GY_RGB(120,120,220),
+    GY_RGB(52,54,59), GY_RGB(0,150,150), GY_RGB(58,60,66), 0x66000000u,
+    8.0f / 15, 6.0f / 15, 28.0f / 15, 4.0f / 15, 16.0f / 15, 10.0f / 15, 6.0f / 15,
+    24.0f / 15, 160.0f / 15, 110.0f / 15, 6.0f / 15, 12.0f / 15, 22.0f / 15, 6.0f / 15,
+    15,
+};
+
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "blank", t_blank },
@@ -272,7 +284,7 @@ static int relaunch_on_test_desktop(void) {
 
 int main(int argc, char **argv) {
     char out[MAX_PATH], hashes[MAX_PATH], *s;
-    int update = 0, fails = 0, ran = 0, i, a, named = 0, shots = 0, windowed = 0;
+    int update = 0, fails = 0, ran = 0, i, a, named = 0, shots = 0, windowed = 0, old_theme = 0;
     GetModuleFileNameA(NULL, g_root, MAX_PATH);
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\build */
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\guicy */
@@ -280,6 +292,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[a], "--update")) update = 1;
         else if (!strcmp(argv[a], "--shots")) shots = 1;
         else if (!strcmp(argv[a], "--windowed")) windowed = 1;
+        else if (!strcmp(argv[a], "--old-theme")) old_theme = 1;
         else named = 1;
     }
     if (windowed && on_default_desktop()) return relaunch_on_test_desktop();
@@ -296,6 +309,11 @@ int main(int argc, char **argv) {
             FindClose(fh);
         }
     }
+    if (old_theme) {                           /* the proof that the 11-23 theme moved only colours and the choices' look:
+                                                  the old theme and flat choices against the old goldens, byte for byte */
+        gy__test_theme = &g_old_theme; gy__test_flat_select = 1; update = 0;
+        snprintf(hashes, sizeof hashes, "%s\\tests\\golden\\hashes-old-theme.txt", g_root);
+    } else
     snprintf(hashes, sizeof hashes, "%s\\tests\\golden\\hashes.txt", g_root);
     load_hashes(hashes);
 
