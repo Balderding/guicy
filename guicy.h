@@ -2374,9 +2374,22 @@ static void gy__tile_chrome(void) {
         int x;
         if (!t->used || !t->leaf || (gy__c.tzoom >= 0 && n != gy__c.tzoom)) continue;
         r = gy__c.tzoom == n ? gy__tile_area() : t->r;
-        gy_canvas_box(r, GY__T.panel, n == gy__c.tfocus ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
+        gy_canvas_box(r, GY__T.panel, GY__T.border, (float)GY__T.radius, 1);
         bar = r; bar.h = GY__TITLE_H;
         gy_canvas_box((gy_rect){ bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 1 }, GY__T.card, 0, (float)GY__T.radius, 0);
+        if (n == gy__c.tfocus) {               /* the focus outline on its own: four thin sides and four
+                                                  clipped corners, so a focus move redraws only the edge tiles */
+            int cs = GY__T.radius + 2, c4, saved = GY__L.clip;
+            gy_canvas_rect((gy_rect){ r.x + cs, r.y, r.w - 2 * cs, 1 }, GY__T.accent, 0);
+            gy_canvas_rect((gy_rect){ r.x + cs, r.y + r.h - 1, r.w - 2 * cs, 1 }, GY__T.accent, 0);
+            gy_canvas_rect((gy_rect){ r.x, r.y + cs, 1, r.h - 2 * cs }, GY__T.accent, 0);
+            gy_canvas_rect((gy_rect){ r.x + r.w - 1, r.y + cs, 1, r.h - 2 * cs }, GY__T.accent, 0);
+            for (c4 = 0; c4 < 4; c4++) {
+                GY__L.clip = gy__clip_push((gy_rect){ c4 & 1 ? r.x + r.w - cs : r.x, c4 & 2 ? r.y + r.h - cs : r.y, cs, cs });
+                gy_canvas_box(r, 0, GY__T.accent, (float)GY__T.radius, 1);
+                GY__L.clip = saved;
+            }
+        }
         x = bar.x + 6;
         for (k = 0; k < t->ntabs; k++) {
             gy__tile *tl = &gy__c.tl[t->tabs[k]];
