@@ -132,3 +132,110 @@ static int t_x1_focus_ring(void) {
     frames(v_scene, 2);
     return 1;
 }
+
+#define CHECK_G(cond, ...) do { if (!(cond)) { LOG(__VA_ARGS__); LOG("; "); goto out; } } while (0)
+
+/* --- IME, windowed: imm32 stood in for, real WM_IME_* messages to GUICy's own window, so the real
+   handler runs: shown, changed, committed, cancelled; then typing arrives; undo takes the commit
+   back in one step. ------------------------------------------------------------------------------ */
+static const WCHAR *ime_comp, *ime_result;
+static LONG ime_cursor;
+static POINT ime_cand;
+static int ime_cand_n;
+static void *WINAPI ime_get(HWND h) { (void)h; return (void *)(intptr_t)1; }
+static BOOL WINAPI ime_release(HWND h, void *c) { (void)h; (void)c; return TRUE; }
+static LONG WINAPI ime_str(void *c, DWORD what, LPVOID buf, DWORD n) {
+    const WCHAR *s = what == 0x0800 ? ime_result : ime_comp;
+    LONG len;
+    (void)c;
+    if (what == 0x0080) return ime_cursor;
+    len = s ? (LONG)wcslen(s) * 2 : 0;
+    if (buf && (DWORD)len <= n) memcpy(buf, s, (size_t)len);
+    return len;
+}
+static BOOL WINAPI ime_comp_win(void *c, void *f) { (void)c; (void)f; return TRUE; }
+static BOOL WINAPI ime_cand_win(void *c, void *f) { (void)c; ime_cand = ((gy__candform *)f)->pt; ime_cand_n++; return TRUE; }
+
+static char ime_buf[64];
+static void ime_body(void) { gy_edit("Name", ime_buf, sizeof ime_buf); }
+static int ime_frames(int n) { while (n--) { gy_wake(); if (!gy_frame()) return 0; ime_body(); } return 1; }
+static int ime_drawn(const char *want) {      /* the composition is drawn in the box */
+    const gy_test_text *t;
+    int i, n = gy_test_texts(&t);
+    for (i = 0; i < n; i++) if (!strcmp(t[i].s, want)) return 1;
+    return 0;
+}
+/* Ctrl+Z inside a frame, through GUICy's key input (a posted Ctrl+Z keydown would also make Windows
+   type a 'z', as the thread's real keyboard state has no Ctrl down) */
+static int ime_undo(void) {
+    gy_wake(); if (!gy_frame()) return 0;
+    gy_input_key(GY_KEY_CTRL, 1); gy_input_key('Z', 1);
+    ime_body();
+    gy_input_key('Z', 0); gy_input_key(GY_KEY_CTRL, 0);
+    return ime_frames(2);
+}
+static void ime_key(int vk, int down) { PostMessageW(gy__c.hwnd, down ? WM_KEYDOWN : WM_KEYUP, (WPARAM)vk, 0); }
+
+static int t_w_ime(void) {
+    gy__os_t keep = gy__os;
+    int ok = 0;
+    strcpy(ime_buf, "base");
+    gy_scale_set(1);
+    if (!gy_open(&(gy_desc){ .title = "gytest w_ime", .w = 420, .h = 120 })) { LOG("gy_open: %s; ", gy_last_error()); return 0; }
+    gy_isa_set(g_isa);
+    gy__os.imm_get = ime_get; gy__os.imm_release = ime_release; gy__os.imm_str = ime_str;
+    gy__os.imm_comp_win = ime_comp_win; gy__os.imm_cand_win = ime_cand_win;
+    ime_cand_n = 0;
+    if (!ime_frames(2)) goto out;
+    ime_key(VK_TAB, 1); ime_key(VK_TAB, 0);   /* Tab into the box: the keys, all selected */
+    if (!ime_frames(2)) goto out;
+    CHECK_G(gy__c.focus != 0, "Tab did not give the box the keys");
+    /* shown */
+    PostMessageW(gy__c.hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+    ime_comp = L"\x306b\x307b"; ime_cursor = 2;
+    PostMessageW(gy__c.hwnd, WM_IME_COMPOSITION, 0, 0x0008 | 0x0080);
+    if (!ime_frames(2)) goto out;
+    CHECK_G(ime_drawn("\xe3\x81\xab\xe3\x81\xbb"), "the composition is not drawn");
+    CHECK_G(!strcmp(ime_buf, "base"), "composing changed the text");
+    CHECK_G(ime_cand_n > 0 && ime_cand.y == gy__c.ime_y + gy__c.ime_h, "the candidate window is not under the caret");
+    /* changed */
+    ime_comp = L"\x306b\x307b\x3093"; ime_cursor = 3;
+    PostMessageW(gy__c.hwnd, WM_IME_COMPOSITION, 0, 0x0008 | 0x0080);
+    if (!ime_frames(2)) goto out;
+    CHECK_G(ime_drawn("\xe3\x81\xab\xe3\x81\xbb\xe3\x82\x93"), "the changed composition is not drawn");
+    /* committed (replaces the selection) */
+    ime_result = L"\x65e5\x672c"; ime_comp = L"";
+    PostMessageW(gy__c.hwnd, WM_IME_COMPOSITION, 0, 0x0800);
+    PostMessageW(gy__c.hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+    if (!ime_frames(2)) goto out;
+    CHECK_G(!strcmp(ime_buf, "\xe6\x97\xa5\xe6\x9c\xac"), "after the commit the text is \"%s\"", ime_buf);
+    CHECK_G(!gy__c.ime[0], "the composition stayed after the commit");
+    /* cancelled */
+    PostMessageW(gy__c.hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+    ime_comp = L"abc"; ime_cursor = 3;
+    PostMessageW(gy__c.hwnd, WM_IME_COMPOSITION, 0, 0x0008 | 0x0080);
+    if (!ime_frames(2)) goto out;
+    PostMessageW(gy__c.hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+    if (!ime_frames(2)) goto out;
+    CHECK_G(!strcmp(ime_buf, "\xe6\x97\xa5\xe6\x9c\xac") && !gy__c.ime[0] && !ime_drawn("abc"), "cancel left \"%s\"", ime_buf);
+    /* then typing arrives */
+    PostMessageW(gy__c.hwnd, WM_CHAR, 'x', 0);
+    if (!ime_frames(2)) goto out;
+    CHECK_G(!strcmp(ime_buf, "\xe6\x97\xa5\xe6\x9c\xacx"), "typing after the IME gave \"%s\"", ime_buf);
+    /* undo: the x, then the commit in one step */
+    if (!ime_undo()) goto out;
+    CHECK_G(!strcmp(ime_buf, "\xe6\x97\xa5\xe6\x9c\xac"), "the first undo gave \"%s\"", ime_buf);
+    if (!ime_undo()) goto out;
+    CHECK_G(!strcmp(ime_buf, "base"), "the second undo gave \"%s\", want the text before the commit", ime_buf);
+    /* for eyes: a composition in progress, underlined at the caret */
+    PostMessageW(gy__c.hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+    ime_comp = L"\x306b\x307b\x3093"; ime_cursor = 3;
+    PostMessageW(gy__c.hwnd, WM_IME_COMPOSITION, 0, 0x0008 | 0x0080);
+    if (!ime_frames(2)) goto out;
+    LOG("shown, changed, committed, cancelled, typing, undo of the commit in one step; candidate window placed %d times; ", ime_cand_n);
+    ok = 1;
+out:
+    gy_end();
+    gy__os = keep;
+    return ok;
+}

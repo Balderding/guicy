@@ -190,6 +190,7 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "x1_focus_walk", t_x1_focus_walk },
     { "x1_focus_keys", t_x1_focus_keys },
     { "x1_focus_ring", t_x1_focus_ring },
+    { "w_ime", t_w_ime },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
     { "w_dpi", t_w_dpi },

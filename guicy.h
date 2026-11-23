@@ -475,9 +475,16 @@ typedef struct gy__os_t {
     BOOL (WINAPI *spi)(UINT, UINT, PVOID, UINT);           /* SystemParametersInfoW: high contrast */
     UINT (*monitor_dpi)(HMONITOR);             /* GetDpiForMonitor (shcore, loaded at run time), or 96 */
     DWORD (WINAPI *font_data)(HDC, DWORD, DWORD, PVOID, DWORD);   /* GetFontData: the cmap table */
+    /* imm32 (loaded at run time when an IME first talks): ImmGetContext, ImmReleaseContext,
+       ImmGetCompositionStringW, ImmSetCompositionWindow, ImmSetCandidateWindow */
+    void *(WINAPI *imm_get)(HWND);
+    BOOL (WINAPI *imm_release)(HWND, void *);
+    LONG (WINAPI *imm_str)(void *, DWORD, LPVOID, DWORD);
+    BOOL (WINAPI *imm_comp_win)(void *, void *);
+    BOOL (WINAPI *imm_cand_win)(void *, void *);
 } gy__os_t;
 static UINT gy__dpi_of_monitor(HMONITOR m);
-static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, SystemParametersInfoW, gy__dpi_of_monitor, GetFontData };
+static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, SystemParametersInfoW, gy__dpi_of_monitor, GetFontData, 0, 0, 0, 0, 0 };
 
 /* the monitor's DPI through shcore's GetDpiForMonitor when Windows has it (8.1 and later) */
 static UINT gy__dpi_of_monitor(HMONITOR m) {
@@ -547,7 +554,9 @@ typedef struct gy__ctx {
     uint32_t active, focus, last_id, focus_claimed;
     uint32_t kf[256], kfocus, ktabbed;         /* keyboard focus: this frame's widgets in order, the focused one,
                                                   the one a Tab just reached */
-    int nkf, nkf_prev, kvis;                   /* kvis: the outline shows (after a Tab, until a click) */
+    int nkf, nkf_prev, kvis;
+    char ime[256];                             /* the IME's composition (UTF-8), drawn in the focused edit box */
+    int ime_cur, ime_x, ime_y, ime_h, ime_commit;   /* its caret (bytes), where the box's caret is (device px) */                   /* kvis: the outline shows (after a Tab, until a click) */
     int disabled, drag_x, drag_y;
     float drag_v;
     gy__st states[GY__STATES];
@@ -2115,16 +2124,18 @@ static int gy__edit_core(uint32_t id, gy__ir r, char *buf, int cap, int numeric)
             char u[4];
             int n = gy__utf8_put(u, gy__c.chars[i]), car;
             a = gy__mini(st->i0, st->i1); b = gy__maxi(st->i0, st->i1);
-            gy__undo_push(buf, 1);
+            gy__undo_push(buf, gy__c.ime_commit ? 4 : 1);   /* an IME commit is one step of its own */
             car = gy__edit_replace(buf, cap, a, b, u, n, numeric);
             if (car != a || a != b) flags |= GY_EDIT_CHANGED;
             st->i0 = st->i1 = car; st->i2 = (int)gy__c.now;
         }
-        gy__c.nchars = 0;
+        gy__c.nchars = 0; gy__c.ime_commit = 0;
     }
-    /* draw: the box, the selection, the text (scrolled so the caret shows), the caret */
+    /* draw: the box, the selection, the text (scrolled so the caret shows), the caret; while an IME
+       composes, its string sits at the caret, underlined, in place of the selection */
     {
-        int cx = gy__text_w(buf, buf + st->i0), a = gy__mini(st->i0, st->i1), b = gy__maxi(st->i0, st->i1), clip, ty = gy__text_y(r);
+        int a = gy__mini(st->i0, st->i1), b = gy__maxi(st->i0, st->i1), clip, ty = gy__text_y(r), ime = focused && gy__c.ime[0];
+        int cx = ime ? gy__text_w(buf, buf + a) + gy__text_w(gy__c.ime, gy__c.ime + gy__c.ime_cur) : gy__text_w(buf, buf + st->i0);
         if (cx - st->f0 > tr.w) st->f0 = (float)(cx - tr.w);
         if (cx - st->f0 < 0) st->f0 = (float)cx;
         x0 = tr.x - (int)st->f0;
@@ -2133,8 +2144,19 @@ static int gy__edit_core(uint32_t id, gy__ir r, char *buf, int cap, int numeric)
         {
             int saved = GY__L.clip;
             GY__L.clip = clip;
-            if (focused && a != b) gy__rectf((gy__ir){ x0 + gy__text_w(buf, buf + a), ty, gy__text_w(buf + a, buf + b), gy__lineh() }, GY__T.select, 0);
-            gy__draw_text_n(x0, ty, buf, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
+            if (ime) {
+                int ax = x0 + gy__text_w(buf, buf + a), cw = gy__text_w(gy__c.ime, NULL);
+                gy__draw_text_n(x0, ty, buf, buf + a, GY__T.text);
+                gy__draw_text_n(ax, ty, gy__c.ime, NULL, GY__T.text);
+                gy__rectf((gy__ir){ ax, ty + gy__lineh() - GY__S.line, cw, GY__S.line }, GY__T.text, 0);   /* underlined */
+                gy__draw_text_n(ax + cw, ty, buf + b, NULL, GY__T.text);
+            } else {
+                if (focused && a != b) gy__rectf((gy__ir){ x0 + gy__text_w(buf, buf + a), ty, gy__text_w(buf + a, buf + b), gy__lineh() }, GY__T.select, 0);
+                gy__draw_text_n(x0, ty, buf, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
+            }
+            if (focused) {                     /* where the IME puts its windows */
+                gy__c.ime_x = x0 + cx; gy__c.ime_y = ty; gy__c.ime_h = gy__lineh();
+            }
             if (focused) {                     /* the caret blinks: on 530 ms, off 530 ms */
                 unsigned t = gy__c.now - (unsigned)st->i2;
                 if ((t / 530) % 2 == 0) gy__rectf((gy__ir){ x0 + cx, ty, GY__S.line, gy__lineh() }, GY__T.text, 0);
@@ -3641,6 +3663,77 @@ static int gy__dib(int w, int h) {
 }
 
 /* every message GUICy cares about, for its own window and for an app's (gy_event); 1 = taken */
+#ifndef GUICY_NO_IME
+/* --- IME: Japanese, Chinese and Korean input. The composition is drawn in the edit box; the IME's
+   candidate list opens under the caret. Only while an edit box has the keys. ----------------------- */
+typedef struct { DWORD style; POINT pt; RECT area; } gy__compform;              /* COMPOSITIONFORM */
+typedef struct { DWORD index, style; POINT pt; RECT area; } gy__candform;        /* CANDIDATEFORM */
+static int gy__ime_load(void) {
+    static int tried;
+    if (!gy__os.imm_get && !tried) {
+        HMODULE h = LoadLibraryA("imm32.dll");
+        tried = 1;
+        if (h) {
+            gy__os.imm_get = (void *(WINAPI *)(HWND))(void *)GetProcAddress(h, "ImmGetContext");
+            gy__os.imm_release = (BOOL (WINAPI *)(HWND, void *))(void *)GetProcAddress(h, "ImmReleaseContext");
+            gy__os.imm_str = (LONG (WINAPI *)(void *, DWORD, LPVOID, DWORD))(void *)GetProcAddress(h, "ImmGetCompositionStringW");
+            gy__os.imm_comp_win = (BOOL (WINAPI *)(void *, void *))(void *)GetProcAddress(h, "ImmSetCompositionWindow");
+            gy__os.imm_cand_win = (BOOL (WINAPI *)(void *, void *))(void *)GetProcAddress(h, "ImmSetCandidateWindow");
+        }
+    }
+    return gy__os.imm_get && gy__os.imm_release && gy__os.imm_str && gy__os.imm_comp_win && gy__os.imm_cand_win;
+}
+/* a UTF-16 string from the IME: as typed characters (a commit), or as the composition to draw */
+static void gy__ime_text(const WCHAR *w, int n, int commit, int cur) {
+    int i, o = 0;
+    gy__c.ime_cur = 0;
+    for (i = 0; i < n; i++) {
+        uint32_t c = w[i];
+        if (i == cur) gy__c.ime_cur = o;
+        if (c >= 0xD800 && c < 0xDC00 && i + 1 < n && w[i + 1] >= 0xDC00 && w[i + 1] < 0xE000) c = 0x10000u + ((c - 0xD800u) << 10) + (w[++i] - 0xDC00u);
+        if (commit) gy_input_char(c);
+        else if (o < 251) o += gy__utf8_put(gy__c.ime + o, c);
+    }
+    if (cur >= n) gy__c.ime_cur = o;
+    gy__c.ime[commit ? 0 : o] = 0;
+}
+static void gy__ime_place(HWND hw, void *imc) {   /* the IME's windows at the caret */
+    gy__compform cf;
+    gy__candform cd;
+    gy__memset(&cf, 0, sizeof cf); gy__memset(&cd, 0, sizeof cd);
+    cf.style = 0x0002;                         /* CFS_POINT */
+    cf.pt.x = gy__c.ime_x; cf.pt.y = gy__c.ime_y;
+    gy__os.imm_comp_win(imc, &cf);
+    cd.style = 0x0080;                         /* CFS_EXCLUDE: under the caret, never over the line */
+    cd.pt.x = gy__c.ime_x; cd.pt.y = gy__c.ime_y + gy__c.ime_h;
+    SetRect(&cd.area, gy__c.ime_x, gy__c.ime_y, gy__c.ime_x + 1, gy__c.ime_y + gy__c.ime_h);
+    gy__os.imm_cand_win(imc, &cd);
+    (void)hw;
+}
+static int gy__ime(HWND hw, UINT msg, LPARAM lp) {
+    void *imc;
+    WCHAR w[128];
+    LONG n;
+    if (!gy__c.focus || !gy__ime_load() || !(imc = gy__os.imm_get(hw))) return 0;
+    if (msg == WM_IME_COMPOSITION) {
+        if (lp & 0x0800) {                     /* GCS_RESULTSTR: the commit, typed as one undo step */
+            n = gy__os.imm_str(imc, 0x0800, w, sizeof w);
+            gy__c.ime_commit = 1; gy__c.undo_kind = 0;
+            if (n > 0) gy__ime_text(w, (int)(n / 2), 1, 0);
+        }
+        if (lp & 0x0008) {                     /* GCS_COMPSTR: the composition so far, and its caret */
+            LONG cur = (lp & 0x0080) ? gy__os.imm_str(imc, 0x0080, NULL, 0) : 1 << 20;
+            n = gy__os.imm_str(imc, 0x0008, w, sizeof w);
+            gy__ime_text(w, n > 0 ? (int)(n / 2) : 0, 0, (int)cur);
+        } else if (lp & 0x0800) gy__c.ime[0] = 0;
+    } else gy__c.ime[0] = 0;                   /* start or end: nothing composed yet / any more (cancel) */
+    gy__ime_place(hw, imc);
+    gy__os.imm_release(hw, imc);
+    gy__c.passes = gy__maxi(gy__c.passes, 2);
+    return 1;
+}
+#endif
+
 static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
     *res = 0;
     switch (msg) {
@@ -3674,6 +3767,10 @@ static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
         gy_input_key((int)wp, 1); gy__c.passes = 2; return 1;
     case WM_KEYUP: case WM_SYSKEYUP: gy_input_key((int)wp, 0); gy__c.passes = gy__maxi(gy__c.passes, 1); return 1;
     case WM_SYSCHAR: return 1;                 /* no beep for Alt+key */
+#ifndef GUICY_NO_IME
+    case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
+        return gy__ime(hw, msg, lp);           /* taken (no DefWindowProc): GUICy draws the composition */
+#endif
     case WM_CHAR: {
         WCHAR c = (WCHAR)wp;
         if (c >= 0xD800 && c < 0xDC00) { gy__c.surrogate = c; return 1; }

@@ -55,3 +55,4 @@ x1_fallback_125 8d1dd4cfabfebf4a
 x1_focus_walk d3fb6a6276d60aad
 x1_focus_keys 0d1af05d6efda8db
 x1_focus_ring bf462c21c7bd24ec
+w_ime 206c0db89def7f1e
