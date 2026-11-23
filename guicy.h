@@ -751,11 +751,14 @@ const char *gy_isa_name(void) {
 static int gy__font_make(const char *face, int px, int bold);
 static void gy__tile_keys_default(void);
 
+static int gy__ncorners, gy__corner_off;       /* the corner cache (below), whose pages live in the arena */
+
 static int gy__init(void) {
     char isa[16];
     DWORD n;
     if (gy__c.ready) return 1;
     gy__memset(&gy__c, 0, sizeof gy__c);
+    gy__ncorners = 0;                          /* its pages went with the last context's arena */
     if (!gy__arena_init(&gy__c.perm, (size_t)1 << 30) || !gy__arena_init(&gy__c.frame, (size_t)1 << 30)) {
         gy__set_error("GUICy could not reserve its memory", NULL); return 0;
     }
@@ -2668,10 +2671,10 @@ static uint32_t gy__box_cov(float px, float py, float cx, float cy, float hx, fl
     return d <= 0 ? 0 : d >= 1 ? 255 : (uint32_t)(d * 255.0f + 0.5f);
 }
 
-static uint32_t gy__box_px(const gy__inst *in, float px, float py, float cx, float cy, float hx, float hy) {
-    uint32_t co = gy__box_cov(px, py, cx, cy, hx, hy, in->radius), ci, s;
+/* a box pixel's colour from its two coverages: the box (co) and the inside of its border (ci) */
+static uint32_t gy__box_mix(const gy__inst *in, uint32_t co, uint32_t ci) {
+    uint32_t s;
     if (in->border <= 0) return gy__scale(in->col0, co);
-    ci = gy__box_cov(px, py, cx, cy, hx - in->border, hy - in->border, gy__maxf(in->radius - in->border, 0));
     s = gy__scale(in->col0, ci);
     if (co > ci) {                              /* add the ring's share of the border colour */
         uint32_t b = gy__scale(in->col1, co - ci), o = 0;
@@ -2682,10 +2685,66 @@ static uint32_t gy__box_px(const gy__inst *in, float px, float py, float cx, flo
     return s;
 }
 
+static uint32_t gy__box_px(const gy__inst *in, float px, float py, float cx, float cy, float hx, float hy) {
+    uint32_t co = gy__box_cov(px, py, cx, cy, hx, hy, in->radius), ci = 0;
+    if (in->border > 0) ci = gy__box_cov(px, py, cx, cy, hx - in->border, hy - in->border, gy__maxf(in->radius - in->border, 0));
+    return gy__box_mix(in, co, ci);
+}
+
+/* --- the corner cache --------------------------------------------------------------------------
+   For a box whose radius and border are multiples of 1/4 px, and which is wider than its two corner
+   column runs and taller than its two edge bands, the coverage of a corner pixel depends only on
+   (radius, border) and the pixel's distance from the box's edges: every term in gy__box_cov is
+   then an exact float (multiples of 1/4 under 2^22), so the same numbers come out for any box
+   size. They are worked out once per (radius, border) and read back, so the same bytes. */
+#define GY__CORNER_KEYS 32
+typedef struct gy__corner {
+    int r4, b4, band, cw;                      /* key (radius and border x 4), and the sizes */
+    unsigned char *co, *ci;                    /* [band][cw]: a band row j from the edge, column k from the edge */
+    unsigned char *mco, *mci;                  /* [cw]: a middle row, column k from the edge */
+    unsigned char *rco, *rci;                  /* [band]: a band row's straight middle span */
+} gy__corner;
+static gy__corner gy__corners[GY__CORNER_KEYS];
+
+static const gy__corner *gy__corner_get(const gy__inst *in, int band, int cw) {
+    int r4 = (int)(in->radius * 4.0f), b4 = (int)(in->border * 4.0f), i, j, k;
+    gy__corner *c;
+    float hx, hy, rr, ri, bb;
+    if ((float)r4 != in->radius * 4.0f || (float)b4 != in->border * 4.0f || in->radius > 64 || in->border > 16) return NULL;
+    for (i = 0; i < gy__ncorners; i++) if (gy__corners[i].r4 == r4 && gy__corners[i].b4 == b4) return &gy__corners[i];
+    if (gy__ncorners == GY__CORNER_KEYS) return NULL;
+    c = &gy__corners[gy__ncorners];
+    c->co = (unsigned char *)gy__arena_push(&gy__c.perm, (size_t)(band * cw * 2 + cw * 2 + band * 2));
+    if (!c->co) return NULL;
+    c->ci = c->co + band * cw; c->mco = c->ci + band * cw; c->mci = c->mco + cw; c->rco = c->mci + cw; c->rci = c->rco + band;
+    c->r4 = r4; c->b4 = b4; c->band = band; c->cw = cw;
+    /* a reference box big enough that its middle is far from every corner */
+    hx = hy = 4096; rr = in->radius; bb = in->border; ri = gy__maxf(rr - bb, 0);
+    for (j = 0; j < band; j++)
+        for (k = 0; k < cw; k++) {
+            float px = -hx + (float)k + 0.5f, py = -hy + (float)j + 0.5f;
+            c->co[j * cw + k] = (unsigned char)gy__box_cov(px, py, 0, 0, hx, hy, rr);
+            c->ci[j * cw + k] = bb > 0 ? (unsigned char)gy__box_cov(px, py, 0, 0, hx - bb, hy - bb, ri) : 0;
+        }
+    for (k = 0; k < cw; k++) {
+        float px = -hx + (float)k + 0.5f;
+        c->mco[k] = (unsigned char)gy__box_cov(px, 0, 0, 0, hx, hy, rr);
+        c->mci[k] = bb > 0 ? (unsigned char)gy__box_cov(px, 0, 0, 0, hx - bb, hy - bb, ri) : 0;
+    }
+    for (j = 0; j < band; j++) {
+        float py = -hy + (float)j + 0.5f;
+        c->rco[j] = (unsigned char)gy__box_cov(0, py, 0, 0, hx, hy, rr);
+        c->rci[j] = bb > 0 ? (unsigned char)gy__box_cov(0, py, 0, 0, hx - bb, hy - bb, ri) : 0;
+    }
+    gy__ncorners++;
+    return c;
+}
+
 static void gy__draw_box_cpu(const gy__inst *in, gy_rect clip) {
     int x0 = gy__maxi(in->x0, clip.x), y0 = gy__maxi(in->y0, clip.y);
     int x1 = gy__mini(in->x1, clip.x + clip.w), y1 = gy__mini(in->y1, clip.y + clip.h);
     int n = x1 - x0, x, y, band, cw, lx1, rx0;
+    const gy__corner *cc;
     float cx = (float)(in->x0 + in->x1) * 0.5f, cy = (float)(in->y0 + in->y1) * 0.5f;
     float hx = (float)(in->x1 - in->x0) * 0.5f, hy = (float)(in->y1 - in->y0) * 0.5f;
     uint32_t *row;
@@ -2705,9 +2764,38 @@ static void gy__draw_box_cpu(const gy__inst *in, gy_rect clip) {
     if (2 * cw >= in->x1 - in->x0) cw = in->x1 - in->x0;  /* narrow: every pixel by itself */
     lx1 = gy__clampi(in->x0 + cw, x0, x1);     /* [x0, lx1) the left corner columns (inside the clip) */
     rx0 = gy__clampi(in->x1 - cw, lx1, x1);    /* [rx0, x1) the right ones; between them the span */
+    cc = !gy__corner_off && 2 * cw < in->x1 - in->x0 && 2 * band < in->y1 - in->y0 ? gy__corner_get(in, band, cw) : NULL;
     mark = gy__c.frame.used;
     row = (uint32_t *)gy__arena_push(&gy__c.frame, sizeof(uint32_t) * (size_t)n);
     if (!row) return;
+    if (cc) {                                  /* the cached coverages, mirrored for the right side */
+        for (x = x0; x < lx1; x++) { int k = x - in->x0; row[x - x0] = gy__box_mix(in, cc->mco[k], cc->mci[k]); }
+        for (x = rx0; x < x1; x++) { int k = in->x1 - 1 - x; row[x - x0] = gy__box_mix(in, cc->mco[k], cc->mci[k]); }
+        for (y = y0; y < y1; y++) {
+            uint32_t *d = gy__c.px + (size_t)y * gy__c.w;
+            int j;
+            if (y >= in->y0 + band && y < in->y1 - band) {
+                if (lx1 > x0) gy__c.k_row(d + x0, row, lx1 - x0);
+                if (rx0 > lx1) gy__c.k_fill(d + lx1, rx0 - lx1, in->col0);
+                if (x1 > rx0) gy__c.k_row(d + rx0, row + (rx0 - x0), x1 - rx0);
+                continue;
+            }
+            j = y < in->y0 + band ? y - in->y0 : in->y1 - 1 - y;      /* the band row, from its edge */
+            for (x = x0; x < lx1; x++) {
+                int k = x - in->x0;
+                uint32_t s = gy__box_mix(in, cc->co[j * cw + k], cc->ci[j * cw + k]);
+                if (s) d[x] = gy__over(d[x], s);
+            }
+            if (rx0 > lx1) gy__c.k_fill(d + lx1, rx0 - lx1, gy__box_mix(in, cc->rco[j], cc->rci[j]));
+            for (x = rx0; x < x1; x++) {
+                int k = in->x1 - 1 - x;
+                uint32_t s = gy__box_mix(in, cc->co[j * cw + k], cc->ci[j * cw + k]);
+                if (s) d[x] = gy__over(d[x], s);
+            }
+        }
+        gy__c.frame.used = mark;
+        return;
+    }
     for (x = x0; x < lx1; x++) row[x - x0] = gy__box_px(in, (float)x + 0.5f, cy, cx, cy, hx, hy);
     for (x = rx0; x < x1; x++) row[x - x0] = gy__box_px(in, (float)x + 0.5f, cy, cx, cy, hx, hy);
     for (y = y0; y < y1; y++) {

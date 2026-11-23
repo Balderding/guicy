@@ -29,3 +29,4 @@ tile_small 8602afe406dddfbf
 fix_offscreen_leak 341d003ab014ecdb
 fix_tile_many cf7d08f2f76d4fee
 f1_cull 17e068c88874809c
+f1_corner_cache dacfd42c1be3a32d

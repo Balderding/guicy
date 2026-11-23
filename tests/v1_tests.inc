@@ -506,3 +506,32 @@ static int t_f1_cull(void) {
     CHECK(hc == hb && c == b, "gy_scroll_rows differs from drawing every row (scrolled)");
     return list_run(100000, 1, 1, &c, &hc) && open_at(480, 360) && (list_n = 100000, list_helper = 1, gy_input_mouse(200, 200), frames(list_scene, 2), gy_input_wheel(-3), frames(list_scene, 2), 1);
 }
+
+/* F1: the corner cache gives the same bytes as working every corner pixel out, over many boxes */
+static unsigned box_seed = 7;
+static unsigned box_rnd(void) { box_seed = box_seed * 1664525u + 1013904223u; return box_seed >> 8; }
+static void boxes_scene(void) {
+    int i;
+    gy_begin();
+    box_seed = 7;
+    for (i = 0; i < 400; i++) {
+        gy_rect r;
+        float rad = (float)(box_rnd() % 49) / 4.0f, bw = (float)(box_rnd() % 13) / 4.0f;   /* 0..12 and 0..3 in quarters */
+        gy_color f = 0xFF000000u | (box_rnd() & 0xFFFFFF), b = 0xFF000000u | (box_rnd() & 0xFFFFFF);
+        if (box_rnd() % 3 == 0) f = (f & 0x00FFFFFF) | 0x80000000u, f = (f & 0xFF000000u) | (((f >> 1) & 0x7F7F7F));  /* half see-through, premultiplied */
+        r.x = (int)(box_rnd() % 560); r.y = (int)(box_rnd() % 400); r.w = 4 + (int)(box_rnd() % 120); r.h = 4 + (int)(box_rnd() % 80);
+        gy_canvas_box(r, f, b, rad, bw);
+    }
+    gy_end();
+}
+static int t_f1_corner_cache(void) {
+    uint64_t with, without;
+    if (!open_at(640, 480)) return 0;
+    gy__corner_off = 1; boxes_scene(); without = frame_hash(); gy__corner_off = 0;
+    gy_shutdown();
+    if (!open_at(640, 480)) return 0;
+    boxes_scene(); with = frame_hash();
+    LOG("400 random boxes, %d corner keys; ", gy__ncorners);
+    CHECK(with == without, "the corner cache changed pixels");
+    return 1;
+}
