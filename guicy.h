@@ -163,6 +163,8 @@ void gy_error(const char *text);              /* a banner at the bottom of the w
 /* --- containers ----------------------------------------------------------------------------------- */
 void gy_scroll_begin(const char *id, int h);  /* a scrolled region h px high (h <= 0: the rest) */
 void gy_scroll_end(void);
+void gy_scroll_rows(int n, int *first, int *last);  /* in a scroll region: of n one-line rows, only
+                                                 first..last are on screen; draw those, the rest take their space */
 int  gy_tree(const char *label);              /* a fold-out row; 1 when open (then call gy_tree_end) */
 void gy_tree_end(void);
 void gy_panel_begin(void);                    /* a card around the widgets until _end */
@@ -379,6 +381,7 @@ typedef struct gy__lay {
     int kind;                                  /* GY__L_* */
     uint32_t id;
     int top;                                   /* where the container started (scroll: content top) */
+    int tail;                                  /* scroll: the height of rows gy_scroll_rows skipped at the end */
     int bg_inst;                               /* a background instance patched at the end (-1: none) */
     float split_pos;
     gy_rect pane_b;                            /* a split's second pane, waiting for gy_pane */
@@ -424,6 +427,8 @@ typedef struct gy__ctx {
     /* draw list */
     gy__inst *inst;
     int ninst, cap_inst, layer;
+    int no_cull, culled;                       /* culling: off for a placeholder; how many were skipped */
+    gy__inst cull_scratch;                     /* where a culled push writes */
     gy_rect clips[256];
     int nclips;
 
@@ -872,6 +877,15 @@ static gy__st *gy__state(uint32_t id) {
 /* --- the draw list -------------------------------------------------------------------------------- */
 static gy__inst *gy__push(int kind, int x0, int y0, int x1, int y1) {
     gy__inst *in;
+    if (!gy__c.no_cull) {                      /* nothing of it would show: it is not kept (it would add
+                                                  no pixel and no hash to any tile, so the frame is the same) */
+        gy_rect cl = gy__c.clips[gy__c.nlay ? GY__L.clip : 0];
+        if (x1 <= cl.x || y1 <= cl.y || x0 >= cl.x + cl.w || y0 >= cl.y + cl.h || x1 <= x0 || y1 <= y0) {
+            gy__c.culled++;
+            gy__memset(&gy__c.cull_scratch, 0, sizeof gy__c.cull_scratch);
+            return &gy__c.cull_scratch;        /* callers may write to it; it is never drawn */
+        }
+    }
     if (gy__c.ninst == gy__c.cap_inst) {      /* grow: never drop a command */
         int cap = gy__c.cap_inst ? gy__c.cap_inst * 2 : 4096;
         gy__inst *n = (gy__inst *)gy__arena_push(&gy__c.frame, sizeof(gy__inst) * (size_t)cap);
@@ -1055,7 +1069,10 @@ int gy_text_width(const char *s) { return gy__text_w(s, s + 0x7FFFFFFF); }
 
 static void gy__draw_text_n(int x, int y, const char *s, const char *end, gy_color col) {
     int base = y + gy__c.fonts[gy__c.font].ascent;
+    gy_rect cl = gy__c.clips[gy__c.nlay ? GY__L.clip : 0];
+    if (y >= cl.y + cl.h || y + gy__c.fonts[gy__c.font].height + 8 <= cl.y) { gy__c.culled++; return; }   /* the line is outside the clip */
     while (s < end && *s) {
+        if (x >= cl.x + cl.w + 8) break;       /* the rest of the line is right of the clip (8: overhangs) */
         gy__glyph *g = gy__glyph_get(gy__c.font, gy__utf8_next(&s));
         if (g->ok && g->w) {
             gy__inst *in = gy__push(GY__K_GLYPH, x + g->ox, base - g->oy, x + g->ox + g->w, base - g->oy + g->h);
@@ -1069,12 +1086,24 @@ static void gy__draw_text_n(int x, int y, const char *s, const char *end, gy_col
 void gy_canvas_text(int x, int y, const char *s, gy_color c) { if (gy__init()) gy__draw_text_n(x, y, s, s + 0x7FFFFFFF, c); }
 
 /* --- baked icons: drawn once into the atlas by distance to their strokes ------------------------ */
-static float gy__seg_dist(float px, float py, float ax, float ay, float bx, float by) {
+static float gy__seg_dist2(float px, float py, float ax, float ay, float bx, float by) {   /* squared */
     float vx = bx - ax, vy = by - ay, wx = px - ax, wy = py - ay;
     float t = (wx * vx + wy * vy) / (vx * vx + vy * vy);
     t = gy__maxf(0, gy__minf(1, t));
     wx -= vx * t; wy -= vy * t;
-    return gy__sqrtf(wx * wx + wy * wy);
+    return wx * wx + wy * wy;
+}
+static float gy__seg_dist(float px, float py, float ax, float ay, float bx, float by) {
+    return gy__sqrtf(gy__seg_dist2(px, py, ax, ay, bx, by));
+}
+
+/* one pixel of a line: the coverage is hw + 0.5 - distance; a pixel at R or more gets none, so its
+   square root is skipped (a pixel just inside R gets under 1/510 coverage, which rounds to 0 too) */
+static void gy__line_px(uint32_t *d, float px, float py, const float *g, gy_color col) {
+    float d2 = gy__seg_dist2(px, py, g[0], g[1], g[2], g[3]), cov;
+    if (d2 >= g[5]) return;
+    cov = gy__clampf(g[4] + 0.5f - gy__sqrtf(d2), 0, 1);
+    if (cov > 0) *d = gy__over(*d, gy__scale(col, (uint32_t)(cov * 255.0f + 0.5f)));
 }
 
 enum { GY__I_CHECK, GY__I_DOWN, GY__I_RIGHT, GY__I_MINUS, GY__I_PLUS, GY__I_CLOSE };
@@ -1917,6 +1946,23 @@ void gy_scroll_begin(const char *idl, int h) {
     gy_id_push((int)id);
 }
 
+void gy_scroll_rows(int n, int *first, int *last) {
+    gy__lay *l = &GY__L;
+    gy_rect view;
+    int pitch, f, e;
+    *first = 0; *last = n - 1;
+    if (n <= 0) { *last = -1; return; }
+    if (gy__c.nlay < 2 || l->kind != GY__L_SCROLL) return;   /* outside a scroll region: every row */
+    if (l->col) gy__newline(l);
+    view = gy__c.clips[l->clip];
+    pitch = gy__rowh(l) + GY__T.gap;
+    f = gy__clampi((view.y - l->cur_y) / pitch, 0, n - 1);
+    e = gy__clampi((view.y + view.h - l->cur_y) / pitch + 1, f, n - 1);
+    l->cur_y += f * pitch;                     /* the rows above the view take their space */
+    l->tail += (n - 1 - e) * pitch;            /* and the rows below it, counted at gy_scroll_end */
+    *first = f; *last = e;
+}
+
 void gy_scroll_end(void) {
     gy__lay *l = &GY__L;
     gy__st *st;
@@ -1927,7 +1973,7 @@ void gy_scroll_end(void) {
     gy_id_pop();
     id = l->id;
     st = gy__state(id);
-    content = gy__lay_bottom(l) - l->area.y;
+    content = gy__lay_bottom(l) - l->area.y + l->tail;
     st->f1 = (float)content;
     view = gy__c.clips[l->clip];
     gy__c.nlay--;
@@ -1990,7 +2036,9 @@ void gy_panel_begin(void) {
     int y;
     if (p->col) gy__newline(p);
     y = p->cur_y;
+    gy__c.no_cull = 1;                         /* the card grows at the end, so it must be kept even if this 1 px row is hidden */
     gy_canvas_box((gy_rect){ p->area.x, y, p->area.w, 1 }, GY__T.card, GY__T.border, (float)GY__T.radius, 1);
+    gy__c.no_cull = 0;
     l = gy__lay_push(GY__L_PANEL, (gy_rect){ p->area.x + GY__T.pad, y + GY__T.pad, p->area.w - 2 * GY__T.pad, p->area.y + p->area.h - y - 2 * GY__T.pad }, p->clip);
     l->bg_inst = gy__c.ninst - 1;              /* the card is patched to the right height at the end */
     l->top = y;
@@ -2701,12 +2749,31 @@ static void gy__draw_line_cpu(const gy__inst *in, gy_rect clip) {
     int x0 = gy__maxi(in->x0, clip.x), y0 = gy__maxi(in->y0, clip.y);
     int x1 = gy__mini(in->x1, clip.x + clip.w), y1 = gy__mini(in->y1, clip.y + clip.h), x, y;
     float ax = in->border, ay = in->soft, bx = gy__bitsf(in->a), by = gy__bitsf(in->b), hw = in->radius;
+    float dx = bx - ax, dy = by - ay, len = gy__sqrtf(dx * dx + dy * dy), R = hw + 0.5f;
+    float minx = gy__minf(ax, bx) - R, maxx = gy__maxf(ax, bx) + R;
+    float miny = gy__minf(ay, by) - R, maxy = gy__maxf(ay, by) + R;
+    float g[6];
+    g[0] = ax; g[1] = ay; g[2] = bx; g[3] = by; g[4] = hw; g[5] = R * R;
+    if (gy__absf(dx) > gy__absf(dy)) {         /* a flat line: walk the columns, each needs only a few rows */
+        for (x = x0; x < x1; x++) {
+            float px = (float)x + 0.5f, xc_y = ay + (px - ax) * dy / dx, half = R * len / gy__absf(dx);
+            int ys = gy__maxi(y0, (int)gy__maxf(miny, xc_y - half) - 2), ye = gy__mini(y1, (int)gy__minf(maxy, xc_y + half) + 2);
+            for (y = ys; y < ye; y++) gy__line_px(gy__c.px + (size_t)y * gy__c.w + x, px, (float)y + 0.5f, g, in->col0);
+        }
+        return;
+    }
     for (y = y0; y < y1; y++) {
         uint32_t *d = gy__c.px + (size_t)y * gy__c.w;
-        for (x = x0; x < x1; x++) {
-            float cov = gy__clampf(hw + 0.5f - gy__seg_dist((float)x + 0.5f, (float)y + 0.5f, ax, ay, bx, by), 0, 1);
-            if (cov > 0) d[x] = gy__over(d[x], gy__scale(in->col0, (uint32_t)(cov * 255.0f + 0.5f)));
-        }
+        float py = (float)y + 0.5f, lo = minx, hi = maxx;
+        int xs, xe;
+        /* only the pixels that can be within R of the line: within R of the infinite line means
+           within R*len/|dy| of where it crosses this row (a superset, so the same bytes) */
+        if (gy__absf(dy) > 1e-6f) {
+            float xc = ax + (py - ay) * dx / dy, half = R * len / gy__absf(dy);
+            lo = gy__maxf(lo, xc - half); hi = gy__minf(hi, xc + half);
+        } else if (gy__absf(py - ay) >= R) continue;
+        xs = gy__maxi(x0, (int)lo - 2); xe = gy__mini(x1, (int)hi + 2);
+        for (x = xs; x < xe; x++) gy__line_px(d + x, (float)x + 0.5f, py, g, in->col0);
     }
 }
 
@@ -2716,37 +2783,53 @@ static void gy__draw_image_cpu(const gy__inst *in, gy_rect clip) {
     const gy__image *im = &gy__c.img[in->a < GY__IMAGES ? in->a : 0];
     int dw = in->x1 - in->x0, dh = in->y1 - in->y0, smooth = (int)(in->c & 1u);
     uint32_t *row;
+    int *colx;                                 /* per column: the source x (nearest) or x0, x1, weight */
     size_t mark;
     if (!im->px || x1 <= x0 || y1 <= y0 || dw <= 0 || dh <= 0) return;
     mark = gy__c.frame.used;
     row = (uint32_t *)gy__arena_push(&gy__c.frame, sizeof(uint32_t) * (size_t)(x1 - x0));
-    if (!row) return;
+    colx = (int *)gy__arena_push(&gy__c.frame, sizeof(int) * 3 * (size_t)(x1 - x0));
+    if (!row || !colx) { gy__c.frame.used = mark; return; }
+    /* the source columns and weights are the same on every row: work them out once (the same
+       integer maths as before, so the same bytes, without a 64-bit divide per pixel) */
+    for (x = x0; x < x1; x++) {
+        int *c3 = colx + 3 * (x - x0);
+        if (!smooth) c3[0] = (int)(((int64_t)(x - in->x0) * 2 + 1) * im->w / (2 * dw));
+        else {
+            int64_t fx = (((int64_t)(x - in->x0) * 2 + 1) * im->w * 32768) / dw - 32768;
+            if (fx < 0) fx = 0;
+            c3[0] = (int)(fx >> 16); c3[2] = (int)((fx >> 8) & 255); c3[1] = gy__mini(c3[0] + 1, im->w - 1);
+            c3[0] = gy__mini(c3[0], im->w - 1);
+        }
+    }
     for (y = y0; y < y1; y++) {
         if (!smooth) {                         /* nearest: the pixel whose area holds this pixel's centre */
             int sy = (int)(((int64_t)(y - in->y0) * 2 + 1) * im->h / (2 * dh));
             const uint32_t *s = im->px + (size_t)sy * im->w;
-            for (x = x0; x < x1; x++) row[x - x0] = s[((int64_t)(x - in->x0) * 2 + 1) * im->w / (2 * dw)];
+            for (x = x0; x < x1; x++) row[x - x0] = s[colx[3 * (x - x0)]];
         } else {                               /* bilinear in 16.16 fixed point, integer only */
             int64_t fy = (((int64_t)(y - in->y0) * 2 + 1) * im->h * 32768) / dh - 32768;
             int sy0, sy1, wy;
+            const uint32_t *r0, *r1;
             if (fy < 0) fy = 0;
             sy0 = (int)(fy >> 16); wy = (int)((fy >> 8) & 255); sy1 = gy__mini(sy0 + 1, im->h - 1);
             sy0 = gy__mini(sy0, im->h - 1);
+            r0 = im->px + (size_t)sy0 * im->w; r1 = im->px + (size_t)sy1 * im->w;
             for (x = x0; x < x1; x++) {
-                int64_t fx = (((int64_t)(x - in->x0) * 2 + 1) * im->w * 32768) / dw - 32768;
-                int sx0, sx1, wx, ch;
-                uint32_t a, b, c, d, o = 0;
-                if (fx < 0) fx = 0;
-                sx0 = (int)(fx >> 16); wx = (int)((fx >> 8) & 255); sx1 = gy__mini(sx0 + 1, im->w - 1);
-                sx0 = gy__mini(sx0, im->w - 1);
-                a = im->px[(size_t)sy0 * im->w + sx0]; b = im->px[(size_t)sy0 * im->w + sx1];
-                c = im->px[(size_t)sy1 * im->w + sx0]; d = im->px[(size_t)sy1 * im->w + sx1];
-                for (ch = 0; ch < 32; ch += 8) {
-                    uint32_t top = ((a >> ch) & 255) * (uint32_t)(256 - wx) + ((b >> ch) & 255) * (uint32_t)wx;
-                    uint32_t bot = ((c >> ch) & 255) * (uint32_t)(256 - wx) + ((d >> ch) & 255) * (uint32_t)wx;
-                    o |= ((top * (uint32_t)(256 - wy) + bot * (uint32_t)wy + 32768) >> 16) << ch;
-                }
-                row[x - x0] = o;
+                const int *c3 = colx + 3 * (x - x0);
+                uint32_t wxu = (uint32_t)c3[2], ix = 256 - wxu, iy = 256 - (uint32_t)wy;
+                uint32_t a = r0[c3[0]], b = r0[c3[1]], c = r1[c3[0]], d = r1[c3[1]];
+                /* two channels at a time: R and B (then A and G) in 16-bit lanes for the horizontal
+                   step (at most 255 x 256 = 65280 each), widened to 32-bit lanes for the vertical one;
+                   the same sums as one channel at a time, so the same bytes */
+                uint32_t trb = (a & 0xFF00FFu) * ix + (b & 0xFF00FFu) * wxu, brb = (c & 0xFF00FFu) * ix + (d & 0xFF00FFu) * wxu;
+                uint32_t tag = ((a >> 8) & 0xFF00FFu) * ix + ((b >> 8) & 0xFF00FFu) * wxu, bag = ((c >> 8) & 0xFF00FFu) * ix + ((d >> 8) & 0xFF00FFu) * wxu;
+                uint64_t vrb = ((uint64_t)(trb & 0xFFFF) | (uint64_t)(trb >> 16) << 32) * iy
+                             + ((uint64_t)(brb & 0xFFFF) | (uint64_t)(brb >> 16) << 32) * (uint64_t)wy + 0x0000800000008000ull;
+                uint64_t vag = ((uint64_t)(tag & 0xFFFF) | (uint64_t)(tag >> 16) << 32) * iy
+                             + ((uint64_t)(bag & 0xFFFF) | (uint64_t)(bag >> 16) << 32) * (uint64_t)wy + 0x0000800000008000ull;
+                row[x - x0] = (uint32_t)((vrb >> 16) & 0xFF) | (uint32_t)((vrb >> 48) & 0xFF) << 16
+                            | (uint32_t)((vag >> 16) & 0xFF) << 8 | (uint32_t)((vag >> 48) & 0xFF) << 24;
             }
         }
         gy__c.k_row(gy__c.px + (size_t)y * gy__c.w + x0, row, x1 - x0);
@@ -2764,28 +2847,34 @@ static void gy__draw_inst(const gy__inst *in, gy_rect clip) {
 static int gy__inst_layer(const gy__inst *in) { return (int)(in->c >> 24); }
 
 static void gy__render(void) {
-    int i, t, tx, ty, nt, x0, y0, x1, y1, full, L;
+    int i, k, t, tx, ty, nt, x0, y0, x1, y1, full, L, cnt[GY__LAYERS + 1];
+    int *ord;                                  /* the instances in drawing order: layer 0, then 1, then 2 */
     uint64_t seed;
     gy__c.tiles_x = (gy__c.w + GY__TILE - 1) / GY__TILE;
     gy__c.tiles_y = (gy__c.h + GY__TILE - 1) / GY__TILE;
     nt = gy__c.tiles_x * gy__c.tiles_y;
+    /* one counting sort by layer, so every pass below walks the list once (not once per layer) */
+    ord = (int *)gy__arena_push(&gy__c.frame, sizeof(int) * (size_t)(gy__c.ninst + 1));
+    if (!ord) { gy__set_error("GUICy ran out of memory for the draw order", NULL); return; }
+    for (L = 0; L <= GY__LAYERS; L++) cnt[L] = 0;
+    for (i = 0; i < gy__c.ninst; i++) cnt[gy__mini(gy__inst_layer(&gy__c.inst[i]), GY__LAYERS - 1) + 1]++;
+    for (L = 1; L <= GY__LAYERS; L++) cnt[L] += cnt[L - 1];
+    for (i = 0; i < gy__c.ninst; i++) ord[cnt[gy__mini(gy__inst_layer(&gy__c.inst[i]), GY__LAYERS - 1)]++] = i;
     full = !gy__tiles_ready() || gy__c.tiles_off || gy__c.want_full;   /* (tiles_ready first: it sets up the tables) */
-    if (full) {                                /* everything, the plain way, layer by layer */
+    if (full) {                                /* everything, the plain way */
         gy_clear();
-        for (L = 0; L < GY__LAYERS; L++)
-            for (i = 0; i < gy__c.ninst; i++) if (gy__inst_layer(&gy__c.inst[i]) == L) gy__draw_inst(&gy__c.inst[i], gy__c.clips[gy__c.inst[i].clip]);
+        for (k = 0; k < gy__c.ninst; k++) gy__draw_inst(&gy__c.inst[ord[k]], gy__c.clips[gy__c.inst[ord[k]].clip]);
         gy__c.dirty_tiles = nt;
         if (gy__c.tile_prev) gy__c.want_full = 0;   /* the next frame can compare */
     }
     if (!gy__c.tile_prev) return;
     seed = gy__mix(0xC0FFEEull, gy__c.theme.bg);
     for (t = 0; t < nt; t++) gy__c.tile_cur[t] = seed;
-    for (L = 0; L < GY__LAYERS; L++)
-        for (i = 0; i < gy__c.ninst; i++) {
-            const gy__inst *in = &gy__c.inst[i];
+    for (k = 0; k < gy__c.ninst; k++) {
+            const gy__inst *in = &gy__c.inst[ord[k]];
             gy_rect clip = gy__c.clips[in->clip];
             uint64_t h;
-            if (gy__inst_layer(in) != L || !gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
+            if (!gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
             h = gy__inst_hash(in, clip);
             for (ty = y0 / GY__TILE; ty <= (y1 - 1) / GY__TILE; ty++)
                 for (tx = x0 / GY__TILE; tx <= (x1 - 1) / GY__TILE; tx++) {
@@ -2804,12 +2893,14 @@ static void gy__render(void) {
                 gy__c.dirty_tiles++;
             }
         }
-        if (gy__c.dirty_tiles)
-            for (L = 0; L < GY__LAYERS; L++)
-                for (i = 0; i < gy__c.ninst; i++) {
-                    const gy__inst *in = &gy__c.inst[i];
+        if (gy__c.dirty_tiles * 2 > nt) {      /* most tiles changed: one plain full redraw is cheaper (same pixels) */
+            gy_clear();
+            for (k = 0; k < gy__c.ninst; k++) gy__draw_inst(&gy__c.inst[ord[k]], gy__c.clips[gy__c.inst[ord[k]].clip]);
+        } else if (gy__c.dirty_tiles)
+            for (k = 0; k < gy__c.ninst; k++) {
+                    const gy__inst *in = &gy__c.inst[ord[k]];
                     gy_rect clip = gy__c.clips[in->clip], tr;
-                    if (gy__inst_layer(in) != L || !gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
+                    if (!gy__inst_box(in, clip, &x0, &y0, &x1, &y1)) continue;
                     for (ty = y0 / GY__TILE; ty <= (y1 - 1) / GY__TILE; ty++)
                         for (tx = x0 / GY__TILE; tx <= (x1 - 1) / GY__TILE; tx++) {
                             if (!gy__c.tile_dirty[ty * gy__c.tiles_x + tx]) continue;

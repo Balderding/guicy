@@ -470,3 +470,39 @@ static int t_fix_tile_many(void) {
     CHECK(gy__c.tfocus != f0, "the focus keys do not move the focus");
     return 1;
 }
+
+/* --- F1: culling and the visible-range helper ------------------------------------------------- */
+static int list_n, list_helper;
+static void list_scene(void) {
+    int i, f, e;
+    gy_begin();
+    gy_text("a long list");
+    gy_scroll_begin("biglist", 300);
+    if (list_helper) { gy_scroll_rows(list_n, &f, &e); for (i = f; i <= e; i++) gy_text("row %d", i + 1); }
+    else for (i = 0; i < list_n; i++) gy_text("row %d", i + 1);
+    gy_scroll_end();
+    gy_end();
+}
+static int list_run(int n, int helper, int wheel, int *inst, uint64_t *hash) {
+    if (!open_at(480, 360)) return 0;
+    list_n = n; list_helper = helper;
+    gy_input_mouse(200, 200); frames(list_scene, 2);
+    if (wheel) { gy_input_wheel(-3); frames(list_scene, 2); }
+    *inst = gy_get_stats().instances; *hash = frame_hash();
+    gy_shutdown();
+    return 1;
+}
+static int t_f1_cull(void) {
+    int a, b, c, d;
+    uint64_t ha, hb, hc, hd;
+    /* culling: 100,000 rows push as many instances as 100 (only the visible ones) */
+    if (!list_run(100, 0, 1, &a, &ha) || !list_run(100000, 0, 1, &b, &hb)) return 0;
+    LOG("instances: 100 rows %d, 100,000 rows %d; ", a, b);
+    CHECK(a == b, "100,000 rows push %d instances, 100 rows %d", b, a);
+    /* the helper: the same picture as drawing every row, scrolled or not */
+    if (!list_run(100000, 1, 0, &c, &hc) || !list_run(100000, 0, 0, &d, &hd)) return 0;
+    CHECK(hc == hd && c == d, "gy_scroll_rows differs from drawing every row (top)");
+    if (!list_run(100000, 1, 1, &c, &hc)) return 0;
+    CHECK(hc == hb && c == b, "gy_scroll_rows differs from drawing every row (scrolled)");
+    return list_run(100000, 1, 1, &c, &hc) && open_at(480, 360) && (list_n = 100000, list_helper = 1, gy_input_mouse(200, 200), frames(list_scene, 2), gy_input_wheel(-3), frames(list_scene, 2), 1);
+}
