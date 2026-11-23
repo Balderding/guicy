@@ -415,6 +415,8 @@ typedef struct gy__ctx {
     gy__arena frame;                           /* emptied at every gy_begin */
     int w, h;
     uint32_t *px;                              /* the frame */
+    uint32_t *off_px;                          /* the off-screen frame's own allocation */
+    size_t off_cap;                            /* its size in pixels */
     gy_theme theme;
     char error[512];
     char banner[256];
@@ -772,7 +774,14 @@ static int gy__init(void) {
 int gy_offscreen(int w, int h) {
     if (w <= 0 || h <= 0 || w > 16384 || h > 16384) { gy__set_error("gy_offscreen", "the size must be 1..16384"); return 0; }
     if (!gy__init()) return 0;
-    gy__c.px = (uint32_t *)gy__arena_push(&gy__c.perm, (size_t)w * (size_t)h * 4);
+    /* the frame has its own allocation, freed when the size changes (it used to come from the
+       arena, which never frees, so every resize leaked a frame) */
+    if (gy__c.off_px && (size_t)w * (size_t)h > gy__c.off_cap) { HeapFree(GetProcessHeap(), 0, gy__c.off_px); gy__c.off_px = NULL; }
+    if (!gy__c.off_px) {
+        gy__c.off_px = (uint32_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)w * (size_t)h * 4);
+        gy__c.off_cap = gy__c.off_px ? (size_t)w * (size_t)h : 0;
+    }
+    gy__c.px = gy__c.off_px;
     if (!gy__c.px) { gy__set_error("gy_offscreen", "out of memory for the frame"); return 0; }
     gy__c.w = w; gy__c.h = h;
     gy__c.want_full = 1;
@@ -2104,6 +2113,13 @@ static void gy__tlayout(int n, gy_rect r) {
 
 static gy_rect gy__tile_area(void) { return (gy_rect){ GY__T.pad / 2, GY__T.pad / 2, gy__c.w - GY__T.pad, gy__c.h - GY__T.pad }; }
 
+/* a leaf can be split when both halves, on its longer side, keep the minimum tile size */
+static int gy__tile_can_split(int n) {
+    gy_rect r = gy__c.tn[n].r;
+    if (r.w >= r.h) return (r.w - 6) / 2 >= GY__TILE_MIN_W && r.h >= GY__TILE_MIN_H;
+    return (r.h - 6) / 2 >= GY__TILE_MIN_H && r.w >= GY__TILE_MIN_W;
+}
+
 /* put tile t next to the focused leaf (or as a tab when there is no room) */
 static void gy__tile_insert(int t) {
     int leaf = gy__c.tfocus >= 0 && gy__c.tn[gy__c.tfocus].used ? gy__c.tfocus : gy__first_leaf(gy__c.troot), nl, sp;
@@ -2116,16 +2132,28 @@ static void gy__tile_insert(int t) {
         gy__tlayout(gy__c.troot, gy__tile_area());
         return;
     }
-    L = &gy__c.tn[leaf];
-    {
-        int horiz = L->r.w >= L->r.h;
-        int half = horiz ? (L->r.w - 6) / 2 : (L->r.h - 6) / 2;
-        if ((horiz ? half < GY__TILE_MIN_W : half < GY__TILE_MIN_H) && L->ntabs < GY__TABS) {
-            L->tabs[L->ntabs++] = t;           /* too small to split: a tab in the same stack */
+    /* the focused leaf if it can be split, else a tab there if its stack has room, else the
+       biggest leaf anywhere that can be split, else any stack with room; never a tile under
+       the minimum size, never a ninth tab */
+    if (!gy__tile_can_split(leaf)) {
+        int n, best = -1, area = 0;
+        if (gy__c.tn[leaf].ntabs < GY__TABS) { L = &gy__c.tn[leaf]; L->tabs[L->ntabs++] = t; return; }
+        for (n = 0; n < GY__TNODES; n++)
+            if (gy__c.tn[n].used && gy__c.tn[n].leaf && gy__tile_can_split(n) && gy__c.tn[n].r.w * gy__c.tn[n].r.h > area) { best = n; area = gy__c.tn[n].r.w * gy__c.tn[n].r.h; }
+        if (best < 0) {
+            for (n = 0; n < GY__TNODES; n++)
+                if (gy__c.tn[n].used && gy__c.tn[n].leaf && gy__c.tn[n].ntabs < GY__TABS) { gy__c.tn[n].tabs[gy__c.tn[n].ntabs++] = t; return; }
+            gy__set_error("GUICy: no room for another tile", gy__c.tl[t].name);
             return;
         }
+        leaf = best;
+    }
+    L = &gy__c.tn[leaf];
+    {
+        int horiz = L->r.w >= L->r.h, i, freen = 0;
+        for (i = 0; i < GY__TNODES; i++) freen += !gy__c.tn[i].used;
+        if (freen < 2) { gy__set_error("GUICy: too many tiles", gy__c.tl[t].name); return; }
         nl = gy__tnode_new(); sp = gy__tnode_new();
-        if (nl < 0 || sp < 0) { gy__set_error("GUICy: too many tiles", NULL); return; }
         gy__c.tn[nl].leaf = 1; gy__c.tn[nl].ntabs = 1; gy__c.tn[nl].tabs[0] = t;
         gy__c.tn[sp].dir = horiz ? GY_H : GY_V; gy__c.tn[sp].ratio = 0.5f;
         gy__c.tn[sp].parent = gy__c.tn[leaf].parent;
@@ -2998,6 +3026,7 @@ void gy_shutdown(void) {
     int i;
     for (i = 0; i < gy__c.nfonts; i++) if (gy__c.fonts[i].hf) DeleteObject(gy__c.fonts[i].hf);
     for (i = 1; i < GY__IMAGES; i++) if (gy__c.img[i].px) HeapFree(GetProcessHeap(), 0, gy__c.img[i].px);
+    if (gy__c.off_px) HeapFree(GetProcessHeap(), 0, gy__c.off_px);
     if (gy__c.dc) DeleteDC(gy__c.dc);
     if (gy__c.hwnd) DestroyWindow(gy__c.hwnd);
     if (gy__c.dib) DeleteObject(gy__c.dib);

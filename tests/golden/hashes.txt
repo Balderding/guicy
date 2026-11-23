@@ -26,3 +26,5 @@ tile_restore 9d7290381e8aefe1
 tile_online 6884f362ac25ff4d
 tile_clash f832d6b3ed475af3
 tile_small 8602afe406dddfbf
+fix_offscreen_leak 341d003ab014ecdb
+fix_tile_many cf7d08f2f76d4fee

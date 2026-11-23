@@ -421,3 +421,52 @@ static int t_tile_small(void) {                /* too small to split: new tiles 
     CHECK(strchr(a, '|'), "a small window did not stack the tiles as tabs");
     return 1;
 }
+
+/* --- fixes found by the stress tests (bench/stress.md) ------------------------------------------ */
+
+/* gy_offscreen used to take every frame from the arena, which never frees: 30 resizes leaked 204 MB */
+static int t_fix_offscreen_leak(void) {
+    size_t used0, com0;
+    int i;
+    if (!open_at(640, 400)) return 0;
+    gy_begin(); gy_end();
+    used0 = gy__c.perm.used; com0 = gy__c.perm.committed;
+    for (i = 0; i < 30; i++) { if (!gy_offscreen(400 + i * 37, 300 + i * 23)) return 0; gy_begin(); gy_end(); }
+    CHECK(gy__c.perm.used == used0 && gy__c.perm.committed == com0, "30 resizes grew the arena from %zu to %zu bytes", used0, gy__c.perm.used);
+    if (!gy_offscreen(256, 160)) return 0;
+    gy_begin(); gy_end();
+    LOG("arena unchanged over 30 resizes (%zu bytes); ", used0);
+    return 1;
+}
+
+/* 32 tiles used to end up under the minimum size (down to -6 px), with the focus keys stuck */
+static int many_n;
+static void many_scene(void) {
+    int i;
+    char name[16];
+    gy_begin();
+    for (i = 0; i < many_n; i++) { snprintf(name, sizeof name, "T%02d", i); if (gy_tile(name)) gy_text("%s", name); }
+    gy_end();
+}
+
+static int t_fix_tile_many(void) {
+    int n, under = 0, tabs_max = 0, leaves = 0, f0;
+    if (!open_at(720, 460)) return 0;
+    gy_input_mouse(-100, -100);
+    many_n = 32; frames(many_scene, 3);
+    for (n = 0; n < GY__TNODES; n++) {
+        gy__tnode *t = &gy__c.tn[n];
+        if (!t->used || !t->leaf) continue;
+        leaves++;
+        if (t->r.w < GY__TILE_MIN_W || t->r.h < GY__TILE_MIN_H) under++;
+        if (t->ntabs > tabs_max) tabs_max = t->ntabs;
+    }
+    LOG("32 tiles: %d leaves, %d under the minimum, the biggest stack %d tabs; ", leaves, under, tabs_max);
+    CHECK(under == 0, "%d tiles are under the minimum size", under);
+    CHECK(tabs_max <= GY__TABS, "a stack has %d tabs", tabs_max);
+    f0 = gy__c.tfocus;
+    key(many_scene, GY_MOD_ALT, GY_KEY_RIGHT);
+    if (gy__c.tfocus == f0) key(many_scene, GY_MOD_ALT, GY_KEY_DOWN);
+    CHECK(gy__c.tfocus != f0, "the focus keys do not move the focus");
+    return 1;
+}
