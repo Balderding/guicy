@@ -601,3 +601,25 @@ static int t_old_layouts(void) {
     CHECK(cases == 5, "only %d cases in the file", cases);
     return open_at(64, 64) && (gy_begin(), gy_end(), 1);
 }
+
+/* fix: a flip, a grow/shrink key or a divider drag never puts a tile under the 160x110 minimum
+   (Alt+F used to make a 108 px tile; found while freezing the layouts) */
+static int tiles_worst(void) { return gy__tiles_short(); }
+static int t_fix_tile_min(void) {
+    int i;
+    if (!tiles_open(720, 460)) return 0;
+    key(t_scene, GY_MOD_ALT, GY_KEY_RIGHT);    /* the same moves that made the 108 px tile */
+    key(t_scene, GY_MOD_ALT | GY_MOD_SHIFT, GY_KEY_LEFT);
+    key(t_scene, GY_MOD_ALT, 'F');
+    CHECK(tiles_worst() == 0, "Alt+F left a tile %d px under the minimum", tiles_worst());
+    for (i = 0; i < 20; i++) key(t_scene, GY_MOD_ALT, GY_KEY_MINUS);
+    CHECK(tiles_worst() == 0, "Alt+Minus left a tile %d px under the minimum", tiles_worst());
+    for (i = 0; i < 20; i++) key(t_scene, GY_MOD_ALT, GY_KEY_PLUS);
+    CHECK(tiles_worst() == 0, "Alt+Plus left a tile %d px under the minimum", tiles_worst());
+    /* drag the middle divider far to the right: it stops where Preview would go under 160 */
+    gy_input_mouse(360, 300); t_scene(); gy_input_button(0, 1); t_scene();
+    gy_input_mouse(700, 300); t_scene(); gy_input_button(0, 0); t_scene();
+    CHECK(tiles_worst() == 0, "a divider drag left a tile %d px under the minimum", tiles_worst());
+    gy_input_mouse(-100, -100); frames(t_scene, 2);
+    return 1;
+}

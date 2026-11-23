@@ -2169,6 +2169,21 @@ static void gy__tlayout(int n, gy_rect r) {
 
 static gy_rect gy__tile_area(void) { return (gy_rect){ GY__T.pad / 2, GY__T.pad / 2, gy__c.w - GY__T.pad, gy__c.h - GY__T.pad }; }
 
+/* how far the worst tile is under the minimum size, in px (0: every tile fits), after a fresh layout.
+   A key, a flip or a divider move is refused when it would make this bigger (a tile never goes
+   under its minimum by the user's hand; a window too small to start with doesn't lock the keys). */
+static int gy__tiles_short(void) {
+    int n, worst = 0;
+    if (gy__c.troot < 0) return 0;
+    gy__tlayout(gy__c.troot, gy__tile_area());
+    for (n = 0; n < GY__TNODES; n++) {
+        gy__tnode *t = &gy__c.tn[n];
+        if (!t->used || !t->leaf) continue;
+        worst = gy__maxi(worst, gy__maxi(GY__TILE_MIN_W - t->r.w, GY__TILE_MIN_H - t->r.h));
+    }
+    return worst;
+}
+
 /* a leaf can be split when both halves, on its longer side, keep the minimum tile size */
 static int gy__tile_can_split(int n) {
     gy_rect r = gy__c.tn[n].r;
@@ -2331,11 +2346,20 @@ static void gy__tile_keys(void) {
         else if (a == GY__TA_GROW || a == GY__TA_SHRINK) {
             p = gy__c.tn[f].parent;
             if (p >= 0) {
-                float d = a == GY__TA_GROW ? 0.05f : -0.05f;
+                float d = a == GY__TA_GROW ? 0.05f : -0.05f, old = gy__c.tn[p].ratio;
+                int before = gy__tiles_short();
                 gy__c.tn[p].ratio = gy__clampf(gy__c.tn[p].ratio + (gy__c.tn[p].a == f ? d : -d), 0.1f, 0.9f);
+                if (gy__tiles_short() > before) gy__c.tn[p].ratio = old;   /* a tile would go under its minimum: refused */
             }
         }
-        else if (a == GY__TA_FLIP) { p = gy__c.tn[f].parent; if (p >= 0) gy__c.tn[p].dir = !gy__c.tn[p].dir; }
+        else if (a == GY__TA_FLIP) {
+            p = gy__c.tn[f].parent;
+            if (p >= 0) {
+                int before = gy__tiles_short();
+                gy__c.tn[p].dir = !gy__c.tn[p].dir;
+                if (gy__tiles_short() > before) gy__c.tn[p].dir = !gy__c.tn[p].dir;   /* refused, as above */
+            }
+        }
         else if (a == GY__TA_ZOOM) gy__c.tzoom = gy__c.tzoom == f ? -1 : f;
         else if (a == GY__TA_CLOSE) {
             int t = gy__c.tn[f].tabs[gy__c.tn[f].active];
@@ -2362,8 +2386,22 @@ static void gy__tile_chrome(void) {
         if (t->dir == GY_H) { d.x = gy__c.tn[t->a].r.x + gy__c.tn[t->a].r.w; d.y = t->r.y; d.w = 6; d.h = t->r.h; }
         else { d.x = t->r.x; d.y = gy__c.tn[t->a].r.y + gy__c.tn[t->a].r.h; d.w = t->r.w; d.h = 6; }
         (void)gy__button_logic(0x7D1Du + (uint32_t)n, d, &hot, &held);
-        if (held) t->ratio = gy__clampf(t->dir == GY_H ? (float)(gy__c.mx - t->r.x) / (float)gy__maxi(1, t->r.w) : (float)(gy__c.my - t->r.y) / (float)gy__maxi(1, t->r.h), 0.1f, 0.9f);
-        if (hot && gy__c.dbl[0]) { t->ratio = 0.5f; gy__c.active = 0; }
+        if (held || (hot && gy__c.dbl[0])) {   /* a drag, or a double-click back to the middle; never a tile under its minimum */
+            float old = t->ratio;
+            int before = gy__tiles_short();
+            if (hot && gy__c.dbl[0]) { t->ratio = 0.5f; gy__c.active = 0; }
+            else t->ratio = gy__clampf(t->dir == GY_H ? (float)(gy__c.mx - t->r.x) / (float)gy__maxi(1, t->r.w) : (float)(gy__c.my - t->r.y) / (float)gy__maxi(1, t->r.h), 0.1f, 0.9f);
+            if (gy__tiles_short() > before) {  /* too far: the divider stops at the last place every tile fits */
+                float ok = old, bad = t->ratio;
+                int it;
+                for (it = 0; it < 12; it++) {
+                    t->ratio = (ok + bad) * 0.5f;
+                    if (gy__tiles_short() > before) bad = t->ratio; else ok = t->ratio;
+                }
+                t->ratio = ok;
+                gy__tlayout(gy__c.troot, gy__tile_area());
+            }
+        }
         if (hot || held) SetCursor(LoadCursorW(NULL, (LPCWSTR)(t->dir == GY_H ? IDC_SIZEWE : IDC_SIZENS)));
         if (hot || held) gy_canvas_rect(d.w == 6 ? (gy_rect){ d.x + 2, d.y, 2, d.h } : (gy_rect){ d.x, d.y + 2, d.w, 2 }, GY__T.divider_hot, 1);
     }
