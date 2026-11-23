@@ -18,7 +18,9 @@ src = open(os.path.join(root, "guicy.h"), encoding="utf-8").read().split("\n")
 # the sections that lay out and draw widgets: from the widgets banner to the renderer banner
 start = next(i for i, l in enumerate(src) if "IDs and layout" in l)
 end = next(i for i, l in enumerate(src) if "--- dirty tiles ---" in l)
-rect_arith = re.compile(r"(\.[xywh]\b|\br\.[xywh]|\bbox\.[xywh])\s*[-+*/]\s*([2-9]|\d\d+)\b|\b([2-9]|\d\d+)\s*[-+*/]\s*\w*\.[xywh]\b")
+# a size added to or taken from a rect field (multiplying a scaled size, or halving to centre, is
+# not a size of its own)
+rect_arith = re.compile(r"(\.[xywh]\b)\s*[-+]\s*([2-9]|\d\d+)\b(?!\s*\*)|(?<![*/] )\b([2-9]|\d\d+)\s*[-+]\s*\w*\.[xywh]\b")
 helper_arg = re.compile(r"(gy_canvas_\w+|gy__draw_icon|gy_canvas_box|\(gy_rect\)\s*\{)[^;]*?[,({]\s*([2-9]|\d\d+)\s*[,)}]")
 define_sz = re.compile(r"#define\s+\w*(_W|_H|_PAD|_GAP|_R|_SIZE)\s+\d")
 

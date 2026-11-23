@@ -520,7 +520,7 @@ static void boxes_scene(void) {
         gy_color f = 0xFF000000u | (box_rnd() & 0xFFFFFF), b = 0xFF000000u | (box_rnd() & 0xFFFFFF);
         if (box_rnd() % 3 == 0) f = (f & 0x00FFFFFF) | 0x80000000u, f = (f & 0xFF000000u) | (((f >> 1) & 0x7F7F7F));  /* half see-through, premultiplied */
         r.x = (int)(box_rnd() % 560); r.y = (int)(box_rnd() % 400); r.w = 4 + (int)(box_rnd() % 120); r.h = 4 + (int)(box_rnd() % 80);
-        gy_canvas_box(r, f, b, rad, bw);
+        gy__box((gy__ir){ (int)r.x, (int)r.y, (int)r.w, (int)r.h }, f, b, rad, bw);   /* the pixel-level call: quarter-pixel borders on purpose */
     }
     gy_end();
 }

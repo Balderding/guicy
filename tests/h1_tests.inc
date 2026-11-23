@@ -100,7 +100,7 @@ static int t_h1_test_font(void) {
         int k = i == 0 ? f16 : i == 1 ? f32 : f48, px = 16 * (i + 1);
         gy_font(k);
         if (gy_text_width("abc") != 3 * px / 2 || gy_line_height() != px) {
-            LOG("at %d px: width %d (want %d), line %d (want %d); ", px, gy_text_width("abc"), 3 * px / 2, gy_line_height(), px);
+            LOG("at %d px: width %.1f (want %d), line %.1f (want %d); ", px, (double)gy_text_width("abc"), 3 * px / 2, (double)gy_line_height(), px);
             tf_off(); return 0;
         }
     }

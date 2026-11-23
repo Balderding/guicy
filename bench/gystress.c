@@ -425,7 +425,7 @@ static void scene_tiling(void) {
           st_tile_move(0); frame(tile_body); f1 = gy__c.tfocus; st_tile_move(1); frame(tile_body); f2 = gy__c.tfocus;
           int leaves = 0, small = 0, mw = 99999, mh = 99999, n;
           for (n = 0; n < GY__TNODES; n++) if (gy__c.tn[n].used && gy__c.tn[n].leaf) {
-              gy_rect lr = gy__c.tn[n].r;
+              gy__ir lr = gy__c.tn[n].r;
               leaves++; if (lr.w < GY__TILE_MIN_W || lr.h < GY__TILE_MIN_H) small++;
               if (lr.w < mw) mw = lr.w;
               if (lr.h < mh) mh = lr.h; }
