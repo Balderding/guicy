@@ -1314,7 +1314,7 @@ static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
 /* which font draws cp for font f: selects it into the DC; *code and *how become a glyph number when
    it isn't f's own character. The user's language picks the Han face (Japanese, Chinese, Korean). */
 static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
-    unsigned gid;
+    unsigned gid = 0;
     int i, k;
     if (!gy__c.fb_ready) {
         LANGID l = GetUserDefaultUILanguage();
