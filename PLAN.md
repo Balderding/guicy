@@ -355,8 +355,8 @@ a budget either fixes it or reports why before moving on.
    loads it with LoadLibrary, calls D3DCompile and writes the bytecode headers. That uses an OS DLL
    and installs nothing. The headers are checked in, so normal builds never need it. Open: the
    user still confirms whether reading that OS DLL at build time is fine (Master Control asks).
-3. **ASR:** X:\ is ASR-excluded since the move (2026-11-22), so `gytest` and `gybench` build and run in
-   X:\guicyuild.
+3. **Security software:** some Windows security policies block newly built exes; `gytest` and
+   `gybench` build and run in `build\` of the repo.
 4. **Picture diffs versus Nuklear will not be zero.** Font rasterizing, AA and rounding differ. The
    sign-off is the user's eye on side-by-side pictures, with the diff as a guide, not a pass/fail.
 5. **The one-frame input lag** of the deferred layout can show as a flicker on the frame after a

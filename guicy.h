@@ -1,4 +1,5 @@
-/* guicy.h - GUICy, an immediate-mode GUI library in plain C.  https://github.com/Balderding/guicy (private)
+/* guicy.h - GUICy, an immediate-mode GUI library in plain C.  https://github.com/Balderding/guicy
+   MIT licence (see LICENSE): Copyright (c) 2026 balderding
 
    Use it in ONE .c file of your program:
        #define GUICY_IMPLEMENTATION
