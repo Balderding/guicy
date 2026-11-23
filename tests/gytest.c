@@ -132,6 +132,7 @@ static HWND g_win_to_destroy;                  /* a test's own app window, close
 #include "v1_tests.inc"
 #include "h1_tests.inc"
 #include "d1_tests.inc"
+#include "x1_tests.inc"
 
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
@@ -184,6 +185,8 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "d1_sheet_100", t_d1_sheet_100 },
     { "d1_sheet_125", t_d1_sheet_125 },
     { "d1_sheet_125_portrait", t_d1_sheet_125_portrait },
+    { "x1_fallback_100", t_x1_fallback_100 },
+    { "x1_fallback_125", t_x1_fallback_125 },
     { "w_attach", t_w_attach },
     { "w_open", t_w_open },
     { "w_dpi", t_w_dpi },

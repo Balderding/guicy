@@ -50,3 +50,5 @@ d1_contrast 1745cd1495f7ed0f
 d1_sheet_100 763a0f9577553d60
 d1_sheet_125 7ce0e2fe513d04b9
 d1_sheet_125_portrait cd30508090d6ee8b
+x1_fallback_100 cff184632e5ac029
+x1_fallback_125 8d1dd4cfabfebf4a

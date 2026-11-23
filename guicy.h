@@ -401,8 +401,15 @@ typedef struct gy__glyph {
     uint8_t page, ok;
 } gy__glyph;
 
+/* a font's character table (the OpenType cmap subtable GUICy reads itself): fmt 0 = not read yet,
+   -1 = none (no table, or the face is not installed), 4 or 12 = the subtable at t, n bytes */
+typedef struct gy__cmap { const unsigned char *t; uint32_t n; int fmt; } gy__cmap;
+#define GY__FB_N 14                            /* Windows' own fonts asked for a missing character */
+
 typedef struct gy__font {
     HFONT hf;
+    gy__cmap cmap;                             /* the font's own table: does it have a character */
+    HFONT fbh[GY__FB_N];                       /* the fallback fonts at this font's size, made when first asked */
     WCHAR face[64];
     int dip, bold;                             /* as asked for: the size in DIPs (0: the theme font, which follows the font size) */
     int px, ascent, descent, height;
@@ -467,9 +474,10 @@ typedef struct gy__os_t {
     BOOL (WINAPI *monitor_info)(HMONITOR, LPMONITORINFO);
     BOOL (WINAPI *spi)(UINT, UINT, PVOID, UINT);           /* SystemParametersInfoW: high contrast */
     UINT (*monitor_dpi)(HMONITOR);             /* GetDpiForMonitor (shcore, loaded at run time), or 96 */
+    DWORD (WINAPI *font_data)(HDC, DWORD, DWORD, PVOID, DWORD);   /* GetFontData: the cmap table */
 } gy__os_t;
 static UINT gy__dpi_of_monitor(HMONITOR m);
-static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, SystemParametersInfoW, gy__dpi_of_monitor };
+static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount, GetMonitorInfoW, SystemParametersInfoW, gy__dpi_of_monitor, GetFontData };
 
 /* the monitor's DPI through shcore's GetDpiForMonitor when Windows has it (8.1 and later) */
 static UINT gy__dpi_of_monitor(HMONITOR m) {
@@ -561,6 +569,8 @@ typedef struct gy__ctx {
     /* text */
     HDC dc;
     HFONT dc_font;                             /* the font selected into dc now */
+    gy__cmap fbc[2][GY__FB_N];                 /* the fallback faces' tables, regular and bold */
+    unsigned char fb_order[GY__FB_N], fb_ready;
     gy__font fonts[GY__MAX_FONTS];
     int nfonts, font;
     gy__glyph *glyphs;
@@ -1087,6 +1097,9 @@ static int gy__font_build(gy__font *f) {
     if (!hf) return 0;
     if (f->hf) DeleteObject(f->hf);
     f->hf = hf;
+    {   int k;                                 /* the fallback fonts are made again at the new size when asked */
+        for (k = 0; k < GY__FB_N; k++) if (f->fbh[k]) { DeleteObject(f->fbh[k]); f->fbh[k] = NULL; }
+    }
     SelectObject(gy__c.dc, f->hf);
     gy__c.dc_font = f->hf;
     gy__os.text_metrics(gy__c.dc, &tm);
@@ -1218,25 +1231,139 @@ static gy__glyph *gy__slot(uint32_t key) {
     }
 }
 
+static void gy__select(HFONT hf) { if (gy__c.dc_font != hf) { SelectObject(gy__c.dc, hf); gy__c.dc_font = hf; } }
+
+#ifndef GUICY_NO_FALLBACK
+/* --- fallback glyphs: a character the font lacks (CJK, symbols, emoji in file names) comes from the
+   first of Windows' own fonts that has it. GUICy reads each font's cmap table itself, so the glyph is
+   drawn by its number through the same GDI path: the look stays GDI's, no COM, no DirectWrite. ---- */
+static const WCHAR *const gy__fb_faces[GY__FB_N] = { L"Segoe UI Symbol", L"Segoe UI Emoji", L"Yu Gothic UI",
+    L"Microsoft YaHei UI", L"Microsoft JhengHei UI", L"Malgun Gothic", L"Nirmala UI", L"Leelawadee UI",
+    L"Segoe UI Historic", L"Ebrima", L"Gadugi", L"Myanmar Text", L"Sylfaen", L"Cambria Math" };
+
+static uint32_t gy__be16(const unsigned char *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static uint32_t gy__be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+/* read the cmap of hf (selected into the DC) and keep its best Unicode subtable: format 12 (all of
+   Unicode) over format 4 (the first 65,536). Every offset is checked against the table's size. */
+static void gy__cmap_load(gy__cmap *m, HFONT hf) {
+    DWORD n;
+    unsigned char *t;
+    uint32_t i, nt, best = 0;
+    int fmt = 0;
+    m->fmt = -1;
+    gy__select(hf);
+    n = gy__os.font_data(gy__c.dc, 0x70616D63u /* 'cmap' */, 0, NULL, 0);
+    if (n == GDI_ERROR || n < 12 || n > (1u << 24)) return;
+    t = (unsigned char *)gy__arena_push(&gy__c.perm, n);
+    if (!t || gy__os.font_data(gy__c.dc, 0x70616D63u, 0, t, n) != n) return;
+    nt = gy__be16(t + 2);
+    for (i = 0; i < nt && 12 + i * 8 <= n; i++) {
+        uint32_t pid = gy__be16(t + 4 + i * 8), eid = gy__be16(t + 6 + i * 8), off = gy__be32(t + 8 + i * 8), f;
+        if (off > n - 8 || !(pid == 0 || (pid == 3 && (eid == 1 || eid == 10)))) continue;
+        f = gy__be16(t + off);
+        if (f == 12 && fmt != 12) { best = off; fmt = 12; }
+        else if (f == 4 && !fmt) { best = off; fmt = 4; }
+    }
+    if (fmt) { m->t = t + best; m->n = n - best; m->fmt = fmt; }
+}
+
+/* the glyph number of character c in table m, 0 when the font doesn't have it */
+static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
+    const unsigned char *t = m->t;
+    uint32_t n = m->n, lo = 0, hi, i;
+    if (m->fmt == 12) {
+        hi = gy__be32(t + 12);
+        if (n < 16 || hi > (n - 16) / 12) hi = n < 16 ? 0 : (n - 16) / 12;
+        while (lo < hi) {
+            const unsigned char *g = t + 16 + (i = (lo + hi) / 2) * 12;
+            if (c < gy__be32(g)) hi = i; else if (c > gy__be32(g + 4)) lo = i + 1; else return gy__be32(g + 8) + c - gy__be32(g);
+        }
+        return 0;
+    }
+    if (m->fmt == 4 && c <= 0xFFFF) {
+        uint32_t sx2 = gy__be16(t + 6) & ~1u, start, delta, at, ro;
+        if (16 + sx2 * 4 > n) return 0;
+        hi = sx2 / 2;
+        while (lo < hi) { i = (lo + hi) / 2; if (c > gy__be16(t + 14 + i * 2)) lo = i + 1; else hi = i; }   /* the first end >= c */
+        if (lo >= sx2 / 2) return 0;
+        start = gy__be16(t + 16 + sx2 + lo * 2); delta = gy__be16(t + 16 + 2 * sx2 + lo * 2);
+        at = 16 + 3 * sx2 + lo * 2; ro = gy__be16(t + at);
+        if (c < start) return 0;
+        if (!ro) return (c + delta) & 0xFFFF;
+        at += ro + (c - start) * 2;
+        if (at + 2 > n) return 0;
+        i = gy__be16(t + at);
+        return i ? (i + delta) & 0xFFFF : 0;
+    }
+    return 0;
+}
+
+/* which font draws cp for font f: selects it into the DC; *code and *how become a glyph number when
+   it isn't f's own character. The user's language picks the Han face (Japanese, Chinese, Korean). */
+static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
+    unsigned gid;
+    int i, k;
+    if (!gy__c.fb_ready) {
+        LANGID l = GetUserDefaultUILanguage();
+        int han = 2, sub = l >> 10;
+        unsigned char t;
+        for (i = 0; i < GY__FB_N; i++) gy__c.fb_order[i] = (unsigned char)i;
+        if ((l & 0x3FF) == LANG_CHINESE) han = (sub == SUBLANG_CHINESE_SIMPLIFIED || sub == SUBLANG_CHINESE_SINGAPORE) ? 3 : 4;
+        else if ((l & 0x3FF) == LANG_KOREAN) han = 5;
+        t = gy__c.fb_order[2]; gy__c.fb_order[2] = gy__c.fb_order[han]; gy__c.fb_order[han] = t;
+        gy__c.fb_ready = 1;
+    }
+    if (!f->cmap.fmt) gy__cmap_load(&f->cmap, f->hf);
+    if (f->cmap.fmt < 0 || (gid = gy__cmap_gid(&f->cmap, cp)) != 0) {   /* its own (or no table to ask) */
+        gy__select(f->hf);
+        if (cp > 0xFFFF && f->cmap.fmt > 0) { *code = gid; *how |= GGO_GLYPH_INDEX; }
+        return;
+    }
+    for (i = 0; i < GY__FB_N; i++) {
+        gy__cmap *m = &gy__c.fbc[f->bold != 0][k = gy__c.fb_order[i]];
+        if (m->fmt < 0) continue;
+        if (!f->fbh[k]) {
+            f->fbh[k] = CreateFontW(-f->px, 0, 0, 0, f->bold ? FW_BOLD : FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                                    CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, gy__fb_faces[k]);
+            if (!f->fbh[k]) continue;
+        }
+        if (!m->fmt) {                         /* first ask: is the face really there (Windows substitutes) */
+            WCHAR got[64];
+            gy__select(f->fbh[k]);
+            if (!GetTextFaceW(gy__c.dc, 64, got) || lstrcmpiW(got, gy__fb_faces[k])) { m->fmt = -1; continue; }
+            gy__cmap_load(m, f->fbh[k]);
+        }
+        if (m->fmt > 0 && (gid = gy__cmap_gid(m, cp)) != 0) { gy__select(f->fbh[k]); *code = gid; *how |= GGO_GLYPH_INDEX; return; }
+    }
+    gy__select(f->hf);                         /* no font has it: the font's own missing-glyph box */
+}
+#endif
+
 static gy__glyph *gy__glyph_get(int font, uint32_t cp) {
     static const MAT2 ident = { { 0, 1 }, { 0, 0 }, { 0, 0 }, { 0, 1 } };
     uint32_t key = (uint32_t)(font + 1) << 21 | cp;
     gy__glyph *g;
     GLYPHMETRICS gm;
     DWORD need;
+    UINT code, how = GGO_GRAY8_BITMAP;
     int page = 0, u = 0, v = 0, x, y, pitch;
     if (cp < 128 && gy__c.fonts[font].ascii[cp]) return &gy__c.glyphs[gy__c.fonts[font].ascii[cp] - 1];
     g = gy__slot(key);
     if (g->key == key) return g;
     gy__c.glyph_misses++;
     g->key = key;
-    if (gy__c.dc_font != gy__c.fonts[font].hf) { SelectObject(gy__c.dc, gy__c.fonts[font].hf); gy__c.dc_font = gy__c.fonts[font].hf; }
+    code = cp > 0xFFFF ? 0xFFFD : cp;
+#ifndef GUICY_NO_FALLBACK
+    if (cp >= 128) gy__fallback(&gy__c.fonts[font], cp, &code, &how); else
+#endif
+    gy__select(gy__c.fonts[font].hf);
     /* two calls: the size, then the bitmap. (One call with a 1 MB buffer was tried in F1: GDI then
        takes 11 times as long and returns different pixels, so the size query stays.) */
-    need = gy__os.glyph_outline(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, 0, NULL, &ident);
+    need = gy__os.glyph_outline(gy__c.dc, code, how, &gm, 0, NULL, &ident);
     if (need == GDI_ERROR) { gy__memset(&gm, 0, sizeof gm); need = 0; }
     g->adv = (int16_t)gm.gmCellIncX;
-    if (need && need <= (1u << 20) && gy__os.glyph_outline(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, need, gy__c.scratch, &ident) != GDI_ERROR
+    if (need && need <= (1u << 20) && gy__os.glyph_outline(gy__c.dc, code, how, &gm, need, gy__c.scratch, &ident) != GDI_ERROR
         && gy__atlas_alloc((int)gm.gmBlackBoxX, (int)gm.gmBlackBoxY, &page, &u, &v)) {
         pitch = ((int)gm.gmBlackBoxX + 3) & ~3;  /* GDI rows are DWORD-aligned */
         for (y = 0; y < (int)gm.gmBlackBoxY; y++)
@@ -3695,7 +3822,11 @@ int gy_shot(const char *path) {
 
 void gy_shutdown(void) {
     int i;
-    for (i = 0; i < gy__c.nfonts; i++) if (gy__c.fonts[i].hf) DeleteObject(gy__c.fonts[i].hf);
+    for (i = 0; i < gy__c.nfonts; i++) {
+        int k;
+        if (gy__c.fonts[i].hf) DeleteObject(gy__c.fonts[i].hf);
+        for (k = 0; k < GY__FB_N; k++) if (gy__c.fonts[i].fbh[k]) DeleteObject(gy__c.fonts[i].fbh[k]);
+    }
     for (i = 1; i < GY__IMAGES; i++) if (gy__c.img[i].px) HeapFree(GetProcessHeap(), 0, gy__c.img[i].px);
     if (gy__c.off_px) HeapFree(GetProcessHeap(), 0, gy__c.off_px);
     if (gy__c.dc) DeleteDC(gy__c.dc);
