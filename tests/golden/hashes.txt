@@ -52,3 +52,6 @@ d1_sheet_125 7ce0e2fe513d04b9
 d1_sheet_125_portrait cd30508090d6ee8b
 x1_fallback_100 cff184632e5ac029
 x1_fallback_125 8d1dd4cfabfebf4a
+x1_focus_walk d3fb6a6276d60aad
+x1_focus_keys 0d1af05d6efda8db
+x1_focus_ring bf462c21c7bd24ec

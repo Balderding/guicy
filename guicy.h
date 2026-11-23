@@ -545,6 +545,9 @@ typedef struct gy__ctx {
     uint32_t id_stack[32];
     int id_depth;
     uint32_t active, focus, last_id, focus_claimed;
+    uint32_t kf[256], kfocus, ktabbed;         /* keyboard focus: this frame's widgets in order, the focused one,
+                                                  the one a Tab just reached */
+    int nkf, nkf_prev, kvis;                   /* kvis: the outline shows (after a Tab, until a click) */
     int disabled, drag_x, drag_y;
     float drag_v;
     gy__st states[GY__STATES];
@@ -1714,6 +1717,27 @@ static int gy__button_logic(uint32_t id, gy__ir r, int *hot, int *held) {
     return gy__c.active == id && gy__c.released[0] && over;
 }
 
+/* keyboard focus: every widget that can be used calls this with its id and rect, in drawing order.
+   Tab and Shift+Tab (taken in gy_begin) walk that order; a click moves the focus quietly. The
+   focused widget gets an outline, only after a Tab, so mouse use looks as before. Returns 1 when
+   Enter or Space presses it. Disabled widgets and popups are not in the walk. */
+static int gy__kfocus(uint32_t id, gy__ir r) {
+    int g;
+    if (gy__c.disabled || gy__c.layer) return 0;
+    if (gy__c.nkf < 256) gy__c.kf[gy__c.nkf++] = id;
+    if (gy__c.pressed[0] && gy__mouse_in(r)) { gy__c.kfocus = id; gy__c.kvis = 0; }
+    if (id != gy__c.kfocus || !gy__c.kvis) return 0;
+    g = 2 * GY__S.line;
+    gy__box((gy__ir){ r.x - g, r.y - g, r.w + 2 * g, r.h + 2 * g }, 0, GY__T.accent, (float)(GY__S.radius + g), (float)GY__S.line);
+    if (gy__c.focus) return 0;                 /* an edit box has the keys */
+    return gy__take_key(GY_KEY_ENTER, 0) || gy__take_key(GY_KEY_SPACE, 0);
+}
+/* Left / Right on the focused slider or number: -1, 0 or +1 */
+static int gy__kfocus_step(uint32_t id) {
+    if (id != gy__c.kfocus || !gy__c.kvis || gy__c.focus || gy__c.disabled) return 0;
+    return gy__take_key(GY_KEY_RIGHT, 0) - gy__take_key(GY_KEY_LEFT, 0);
+}
+
 int gy_hovered(void) { return gy__mouse_in(gy__c.last); }
 int gy_clicked(int b) { return b >= 0 && b < 3 && gy__c.released[b] && gy__mouse_in(gy__c.last) && !gy__c.disabled; }
 
@@ -1769,8 +1793,10 @@ void gy_text_wrap(const char *text) {
 static int gy__button_impl(const char *label, int accent, int key) {
     gy__ir r = gy__next();
     const char *end = gy__label_end(label);
-    int hot, held, clicked = gy__button_logic(gy__id(label), r, &hot, &held);
+    uint32_t id = gy__id(label);
+    int hot, held, clicked = gy__button_logic(id, r, &hot, &held);
     gy_color bg;
+    if (gy__kfocus(id, r)) clicked = 1;
     if (key && !gy__c.disabled && !gy__c.focus && gy__take_key(key, 0)) clicked = 1;
     if (accent) bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.accent : hot ? GY__T.accent_hot : GY__T.accent;
     else bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : GY__T.button;
@@ -1786,8 +1812,10 @@ int gy_button_key(const char *label, int key) { return gy__button_impl(label, 0,
 int gy_check(const char *label, int *on) {
     gy__ir r = gy__next(), box;
     const char *end = gy__label_end(label);
-    int hot, held, clicked = gy__button_logic(gy__id(label), r, &hot, &held), size = GY__S.check;
+    uint32_t id = gy__id(label);
+    int hot, held, clicked = gy__button_logic(id, r, &hot, &held), size = GY__S.check;
     (void)held;
+    if (gy__kfocus(id, r)) clicked = 1;
     if (clicked) *on = !*on;
     box.x = r.x; box.y = r.y + (r.h - size) / 2; box.w = box.h = size;
     if (*on) {
@@ -1801,8 +1829,11 @@ int gy_check(const char *label, int *on) {
 int gy_select(const char *label, int on) {
     gy__ir r = gy__next();
     const char *end = gy__label_end(label);
-    int hot, held, clicked = gy__button_logic(gy__id(label), r, &hot, &held);
-    gy_color bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : 0;
+    uint32_t id = gy__id(label);
+    int hot, held, clicked = gy__button_logic(id, r, &hot, &held);
+    gy_color bg;
+    if (gy__kfocus(id, r)) clicked = 1;
+    bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : 0;
     if (bg) gy__rectf(r, bg, (float)GY__S.radius);
     gy__draw_text_n(r.x + GY__S.gap, gy__text_y(r), label, end,
                     gy__c.disabled ? GY__T.text_off : on ? GY__T.accent_text : GY__T.text);
@@ -1836,6 +1867,8 @@ static int gy__slider_core(const char *label, float *v, float lo, float hi, floa
     int hot, held, changed = 0, tw;
     float old = *v, t;
     (void)gy__button_logic(id, r, &hot, &held);
+    (void)gy__kfocus(id, r);
+    { int k = gy__kfocus_step(id); if (k) *v += (float)k * (step > 0 ? step : (hi - lo) / 20); }
     if (held && hi > lo) {
         t = gy__clampf((float)(gy__c.mx - r.x - GY__S.knob / 2) / (float)gy__maxi(1, r.w - GY__S.knob), 0, 1);
         *v = lo + (hi - lo) * t;
@@ -1900,6 +1933,14 @@ static int gy__number_core(const char *label, float *v, float step, float lo, fl
     r.x += lw; r.w -= lw;
     bl = r; bl.w = GY__S.button_w; br = r; br.x = r.x + r.w - GY__S.button_w; br.w = GY__S.button_w;
     mid = r; mid.x += GY__S.button_w; mid.w -= 2 * GY__S.button_w;
+    {   int press = gy__kfocus(id, r), k = gy__kfocus_step(id);
+        *v += (float)k * step;
+        if (press && !st->i0) {                /* Enter or Space: type the value */
+            st->i0 = 1; gy__c.focus = tid; gy__c.focus_claimed = tid;
+            if (is_int) gy__fmt(gy__c.undo[15], 64, "%d", (int)*v); else gy__fmt(gy__c.undo[15], 64, "%.3f", (double)*v);
+            gy__state(tid)->i0 = gy__strlen(gy__c.undo[15]); gy__state(tid)->i1 = 0;
+        }
+    }
     if (st->i0) {                              /* typing a value; Enter or a click elsewhere takes it */
         int f = gy__c.focus == tid ? gy__edit_core(tid, r, gy__c.undo[15], 64, 1) : 0;
         if ((f & GY_EDIT_ENTER) || gy__c.focus != tid) {
@@ -2008,6 +2049,10 @@ static int gy__edit_core(uint32_t id, gy__ir r, char *buf, int cap, int numeric)
     gy__ir tr;
     (void)gy__button_logic(id, r, &hot, &held);
     if (hot && gy__c.pressed[0]) { gy__c.focus = id; gy__c.focus_claimed = id; }
+    if (!numeric) {                            /* a number box's typing field walks as the number box */
+        (void)gy__kfocus(id, r);
+        if (gy__c.ktabbed == id) { gy__c.focus = id; st->i0 = len; st->i1 = 0; }   /* a Tab here: the keys, all selected */
+    }
     focused = gy__c.focus == id;
     st->i0 = gy__clampi(st->i0, 0, len); st->i1 = gy__clampi(st->i1, 0, len);
     tr = r; tr.x += GY__S.inset; tr.w -= 2 * GY__S.inset;
@@ -2164,7 +2209,7 @@ int gy_combo(const char *label, int *sel, const char *items) {
         gy__draw_text_n(r.x, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
         r.x += lw + GY__S.gap; r.w -= lw + GY__S.gap;
     }
-    if (gy__button_logic(id, r, &hot, &held)) {
+    if (gy__button_logic(id, r, &hot, &held) | gy__kfocus(id, r)) {
         if (gy__c.popup_id == id) gy__c.popup_id = 0;
         else { gy__c.popup_id = id; gy__c.popup_kind = 1; }
     }
@@ -2362,7 +2407,7 @@ int gy_tree(const char *label) {
     const char *end = gy__label_end(label);
     int hot, held;
     gy__lay *l;
-    if (gy__button_logic(id, r, &hot, &held)) st->i0 = !st->i0;
+    if (gy__button_logic(id, r, &hot, &held) | gy__kfocus(id, r)) st->i0 = !st->i0;
     if (hot) gy__rectf(r, GY__T.button_hot, (float)GY__S.radius);
     gy__draw_icon(st->i0 ? GY__I_DOWN : GY__I_RIGHT, r.x, r.y + (r.h - GY__S.check) / 2, GY__S.check, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
     gy__draw_text_n(r.x + GY__S.check + GY__S.radius, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
@@ -3099,6 +3144,18 @@ void gy_begin(void) {
     gy__c.resize_w = gy__c.resize_h = 0;
     if (gy__c.attached && gy__c.passes > 0) gy__c.passes--;   /* an app's own loop: this frame is one of the asked-for passes */
     gy__zoom_keys();
+    gy__c.ktabbed = 0;
+    gy__c.nkf_prev = gy__c.nkf;
+    if (gy__c.nkf) {                           /* Tab / Shift+Tab: the next or previous widget of last frame */
+        int dir = gy__take_key(GY_KEY_TAB, 0) ? 1 : gy__take_key(GY_KEY_TAB, GY_MOD_SHIFT) ? -1 : 0, i, n = gy__c.nkf;
+        if (dir) {
+            for (i = 0; i < n && gy__c.kf[i] != gy__c.kfocus; i++) {}
+            i = i == n ? (dir > 0 ? 0 : n - 1) : (i + dir + n) % n;
+            gy__c.kfocus = gy__c.ktabbed = gy__c.kf[i]; gy__c.kvis = 1;
+            if (gy__c.focus) gy__c.focus = 0;  /* the edit box it leaves lets the keys go */
+        }
+    }
+    gy__c.nkf = 0;
     if (gy__c.anim_on && (int)(gy__c.now - gy__c.anim_at) >= 0) gy__c.anim_on = 0;   /* this is the frame it asked for */
     gy__c.frame.used = 0;
     gy__c.inst = NULL; gy__c.ninst = gy__c.cap_inst = 0;
