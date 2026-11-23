@@ -1,6 +1,6 @@
 # GUICy: the next plan (v2)
 
-Draft 3, 2026-11-23 (changes in reviews/PLAN-v2-response-r1.md and -r2.md). Steps 0-5 of PLAN.md
+Draft 4, 2026-11-23 (changes in reviews/PLAN-v2-response-r1.md, -r2.md and -r3.md). Steps 0-5 of PLAN.md
 are done (GUICy 0.4.0, commit e58409b, 30 of 30 tests). This plan replaces PLAN.md steps 6-13 and
 PLAN-tiling.md, and folds in bench/stress.md, bench/compare.md and research/tiling-locks-gpu.md.
 AGENT_RULES.md ("Always", "Desktop apps") applies to every step. Section 8 maps every ask to a step.
@@ -73,13 +73,14 @@ insertions need Master Control's OK (question 1), and **F1 starts only after tha
   (iii) `hello.exe`, one button, the same way, default and with `GUICY_SMALL`;
   (iv) each switch on and off: `GUICY_NO_TILING`, `GUICY_TILING_FULL`, `GUICY_NO_GPU`,
   `GUICY_NO_ANIM`, `GUICY_NO_IME`, `GUICY_NO_DWRITE`, and each W group.
-- **`GUICY_STATIC` is for single-file apps only:** every prototype carries `GUICY_API` (empty, or
-  `static` under the switch) and every definition `__attribute__((unused))`, so unused code drops
-  out with no linker flags and still builds under build.cmd's `-Wall -Wextra -Werror`. hello and
-  core are also built this way as a test.
-- **Budgets:** the **core** (default build: v1 widgets, containers, locks, scaling, IME, fallback
-  glyphs, docks, CPU path) is **120 KB or less** in (i) and (ii). The GPU path adds **20 KB or
-  less**. `hello.exe` with `GUICY_SMALL` (= NO_TILING, NO_IME, NO_DWRITE, NO_GPU) is **40 KB or
+- **`GUICY_STATIC` is for single-file apps only:** `GUICY_API` on every prototype and definition
+  is empty normally and `static __attribute__((unused))` under the switch, so unused code drops out
+  with no linker flags and still builds under `-Wall -Wextra -Werror`, while normal builds keep
+  `-Wunused-function` working on GUICy's own dead code. hello and core are also built this way.
+- **Budgets:** the **core** (default build with `GUICY_NO_GPU`: v1 widgets, containers, locks,
+  scaling, IME, fallback glyphs, docks, CPU path) is **120 KB or less** in (i) and (ii). The GPU
+  path adds **20 KB or less**, so the default build with the GPU path, which an app pays even when
+  the CPU is the default renderer, is **140 KB or less** and is reported beside it. `hello.exe` with `GUICY_SMALL` (= NO_TILING, NO_IME, NO_DWRITE, NO_GPU) is **40 KB or
   less** of GUICy. `GUICY_TILING_FULL` and each W group report their KB and don't count.
 - **Idle stays at one tick:** under 20 ms CPU per 60 s, both renderers, at every step that touches
   the loop, a renderer or animation.
@@ -116,9 +117,13 @@ Deliverable:
 7. Small: full-redraw path when over half the tiles are dirty; one `GetGlyphOutlineW` per miss,
    `SelectObject` only on a font change; SSE2 for glyph rows under 16 px.
 8. Freeze the layout lines and geometry files of today (section 3) before any code changes.
-9. **The raw-pixel check** (`tools/check_px.py`, used by D1): it lists every number literal used
-   as a size in guicy.h's widget, layout and tiling code that doesn't go through `GY__PX()` or a
-   theme field. F1 only reports the count; D1 brings it to zero.
+9. **The raw-pixel check** (`tools/check_px.py`, used by D1). A "size" is, in guicy.h's widget,
+   layout and tiling sections: an integer literal of 2 or more in arithmetic with a rect field
+   (`.x .y .w .h`) or passed as a size to a draw or layout helper, and every `#define` whose name
+   ends in `_W`, `_H`, `_PAD`, `_GAP`, `_R` or `_SIZE`. Intended device-pixel constants (the 64-px
+   dirty tile, 1024 atlas pages, the 16384 frame limit) carry a `/*px*/` mark. It reports both
+   counts, unscaled and marked; F1 only reports, D1 brings unscaled to zero and lists the marked
+   ones in its done-report for review.
 
 Proof:
 - All 30 goldens byte-equal on scalar, SSE2 and AVX2 for items 1-4, 6, 7, except the named
@@ -190,13 +195,22 @@ Deliverable:
 is timed (QueryPerformanceCounter) from taking the input to the return of the present call, so
 `BitBlt`, and the hash pass, upload and `Present1`, are inside each path's CPU ms; the GPU path
 adds its timestamp ms. Median of 3 runs with the spread; offscreen numbers beside, for reference.
+The hidden desktop is occluded, so a present call may return without doing its work: per case and
+path the race also records how many presents returned `DXGI_STATUS_OCCLUDED` and the median time
+of the present call alone.
 
 **The default renderer** (the user's answer: "every case after startup"): the GPU is the default if
 it is faster than the CPU path in **every case once running**: hover, caret, typing, slider,
 progress, scroll, resize, full redraw, tile focus, tile drag. A tie (inside the run-to-run spread)
 is a loss. First frame and start to window are reported but left out of the decision, because the
 GPU can't take part there yet (the CPU draws the first frames while the device is made).
-Otherwise the CPU path stays the default. BENCH.md gets every case either way, with which path
+**A GPU win smaller than its own present-call time, timed while occluded, is not proven, and
+counts as a loss.** So a GPU default needs **one visible run**: at G1 time, and only if the hidden
+numbers allow a GPU win, Master Control asks the user for it (one window shown with
+`SW_SHOWNOACTIVATE`, while the user is away, the race plus the checks listed for it). It is never
+assumed. Until it has run and the GPU wins every case there, the CPU path stays the default, and
+BENCH.md says "GPU wins not proven with presentation". Otherwise too the CPU path stays the
+default. BENCH.md gets every case either way, with which path
 drew each case, working set, idle, other GPU load during the runs (nvidia-smi if present), and the
 note that it is one PC with composition excluded. Hardware, not remote and not Basic Render
 Driver stay coded conditions; apps can still choose with `gy_desc.render`.
@@ -210,9 +224,11 @@ Proof:
 - **WARP on a small set only** (one scene per kind, small windows): WARP against CPU and against
   hardware, same rule.
 - **Child window:** a windowed test sends `WM_NCHITTEST` to the child and gets `HTTRANSPARENT`;
-  `SetFocus(child)` ends with the parent focused. Real mouse routing over the child can't be
-  driven on a hidden desktop (no input reaches it), so it is the user's check at the first port
-  (risk 3); if it fails, a forwarder is added then.
+  `SetFocus(child)` ends with the parent focused; the child stores its context in
+  `GWLP_USERDATA` for that hand-back. Real mouse routing over the child (clicks, capture, cursor,
+  wheel) can't be driven on a hidden desktop, so it is **listed for the visible run, with
+  `GUICY_RENDER=gpu` forced** whatever the default is, and again at the first port. The M1 report
+  says GPU-path input is unverified until then; if it fails, a forwarder is added.
 - **Full-present rule:** a unit test with DXGI stubs in the function table: after occluded,
   restore, resize, scale change and swap, the next `Present1` has no dirty rects; after that, only
   the dirty tiles.
@@ -248,8 +264,12 @@ Deliverable:
   the rect only from `lParam`. Because two monitors at the same DPI but different resolutions send
   no `WM_DPICHANGED`, GUICy also re-reads the monitor on `WM_DISPLAYCHANGE` and when the window
   moves to another monitor (`MonitorFromWindow` changes on `WM_WINDOWPOSCHANGED`).
+- **Moving between monitors:** the monitor is the one under the window's **centre**. The switch is
+  applied on `WM_EXITSIZEMOVE` (at once outside a move), and the resized window keeps its centre,
+  so the centre stays on the new monitor and the factor can't bounce back.
 - **Modes:** `gy_scale_mode(GY_SCALE_DPI_AND_RESOLUTION)` is the default: factor =
-  max(DPI / 96, min(w, h) / 1080), rounded to the nearest 25 % step, using the monitor's
+  max(DPI / 96, min(w, h) / 1080), rounded to the nearest 25 % step (an exact half rounds up, so
+  1.125 gives 125 %), using the monitor's
   **shorter** side so a portrait screen isn't over-scaled. A 4K screen left at 100 % Windows
   scaling gets 200 %, not tiny text. `GY_SCALE_DPI_ONLY` follows only Windows; `GY_SCALE_FIXED`
   with `gy_scale_set(f)` is the app's own number. `gy_scale()` returns the factor in use.
@@ -257,26 +277,39 @@ Deliverable:
   2560x1440 at 96 DPI, and DISPLAY3, 1440x2560 portrait at 96 DPI, both get **125 %**, where the
   apps draw at 100 % today. That is the user's intent ("depending on the resolution everything
   should scale"); the first app port shows the user a before/after at 125 % before sign-off.
-- **The too-small-screen zoom** (L1) multiplies this factor, down to its 75 % floor.
-- **Units:** every API is in DIPs: `gy_desc` (so the window opens at its DIP size times the
-  factor), `gy_row`, `gy_avail`, `gy_last_rect`, canvas coordinates, mouse positions, `gy_split`'s
-  `*pos`, size locks, `gy_dock`. `gy_image(w, h)` is DIPs and scales nearest by default (pixel art
+- **The too-small-screen zoom** (L1) is relative, like browser zoom: it multiplies the monitor's
+  normal factor in steps of 5 % of it, down to 0.75 times it (about 94 % on the user's 125 %
+  screens). Each step re-makes the fonts once; budget 10 ms a step.
+- **Opening size:** a window whose DIP size times the factor is bigger than the work area opens at
+  the work area's size (the UI scale is untouched); only a minimum that doesn't fit starts the zoom.
+- **Units:** every API is in DIPs: `gy_desc`, `gy_row`, `gy_avail`, `gy_last_rect`, canvas
+  coordinates, mouse positions, `gy_split`'s `*pos`, size locks, `gy_dock`. **`gy_rect` becomes
+  float DIPs** (no app is ported yet), and GUICy returns each rect as its pixel edges divided by
+  the factor, so a canvas call at those DIPs rounds back to exactly the same pixel edges. Canvas
+  coordinates go through the same edge rounding; hit tests run in device pixels against the
+  rounded rects, never in DIPs. `gy_image(w, h)` is DIPs and scales nearest by default (pixel art
   stays sharp), bilinear by option; `gy_canvas_image(..., GY_IMG_DEVICE_PX)` draws 1:1 device
   pixels for previews. Layout lines store ratios, so they load the same at any factor.
 - On a change: fonts re-made, glyph atlas and width cache flushed, everything dirty.
 
 Proof:
-- **No pixel constant left unscaled, two ways:** `tools/check_px.py` (F1) reports zero raw sizes;
-  and every golden scene is drawn at factor 1 and at factor 2, and each instance rect at 2 must be
-  the factor-1 rect scaled by the rounding rule (an instance-list check, not a picture check).
+- **No pixel constant left unscaled, two ways:** `tools/check_px.py` (F1) reports zero unscaled
+  sizes; and every golden scene is drawn at factors 1, 2 and 3 with a **synthetic test font**
+  swapped in through H1's table (stubs for `GetGlyphOutlineW` and `GetTextMetricsW` whose
+  advances, heights and bitmaps are exact multiples of the size), and each instance rect must be
+  the factor-1 rect scaled by the rounding rule (an instance-list check). Real hinted fonts don't
+  scale exactly, so the real-font goldens below are for the look.
+- **No seams at 125 %:** a canvas rect drawn at `gy_avail()` covers exactly the panel's pixels, and
+  a click on each 1-px border hits the widget the pixel belongs to.
 - At 96 DPI and factor 1 every existing golden is byte-equal and `old_layouts` equal.
 - New goldens at 96, 144 and 192 DPI for every widget and tile test (CPU; GPU by the G1 rule).
 - **Monitor stubs:** 3840x2160 at 96 DPI picks 200 %; 2560x1440 at 96 picks 125 %; **portrait
   1440x2560 at 96 picks 125 %**; 1920x1080 at 144 picks 150 %; each mode checked the same way. A
   1-DIP border is exactly 1 px wide at 125 %.
 - A windowed script sends `WM_DPICHANGED` 96 to 144 to 120 with `wParam`/`lParam` set and ends on
-  the same picture as a fresh start at 120; a stubbed move to a 4K monitor at 96 DPI changes the
-  factor with no `WM_DPICHANGED`. The client size in DIPs is kept.
+  the same picture as a fresh start at 120; a stubbed move from a 1080p to a 4K monitor at 96 DPI
+  changes the factor with no `WM_DPICHANGED` and settles after one switch. The client size in DIPs
+  is kept. A 1540-DIP window on the portrait 1440x2560 stub opens inside the work area at 125 %.
 Budgets: +5 KB; a scale-change frame 10 ms or less.
 
 ### L1. Developer locks. Milestone M2
@@ -302,8 +335,9 @@ Deliverable (research 2.9):
 - **Too-small screen (the user's answer):** the window's minimum size is raised to fit the locked
   sizes plus the other tiles' minimums, capped at the monitor's work area (`gy__os.work_area`, so
   tests can stub it). When that doesn't fit, **first GUICy shrinks its own UI scale (like a
-  browser zoom) down to a 75 % floor, so the locks hold and everything stays visible. If the
-  window is too small even at 75 %, "locked sizes give way":** locked tiles shrink in proportion
+  browser zoom) down to a 75 % floor, so the locks hold and everything stays visible** (the floor is
+  relative: 0.75 times the monitor's normal factor, in 5 % steps, D1). **If the window is too small
+  even at 75 %, "locked sizes give way":** locked tiles shrink in proportion
   so everything fits, their positions stay locked, and their sizes come back when the window grows
   again. This is the user's own exception to "a developer lock can never be undone by the user",
   for this case only. The zoom and the give-way are logged and shown in a gold banner.
@@ -489,12 +523,14 @@ golden per widget. Budgets: +4 KB, a W group.
 Design:
 - **The context:** today all state is one static struct (`gy__c`, about 1,000 references). It
   becomes a pointer, `#define gy__c (*gy__cur)`, so no reference changes in the text; each window
-  has its own context in its own `VirtualAlloc`. W6 starts by measuring that change alone: KB and
-  the F1 stress numbers before and after. If it costs more than 2 KB or 3 % on any stress case,
-  `GUICY_MULTI_WINDOW` keeps the pointer only for apps that ask, and the static struct stays the
-  default.
-- **Routing:** each GUICy window stores its context in `GWLP_USERDATA`; the window procedure sets
-  `gy__cur` from the HWND for every message and puts it back after.
+  has its own context in its own `VirtualAlloc`. Measured beside it: keeping the static struct and
+  swapping a context in only when a message's window differs from the current one (most messages
+  go to one window, so swaps are rare). Each is judged on code size and on a deterministic proxy,
+  the instruction count of the UI pass and render functions (llvm-objdump), not on timings, which
+  vary more than the threshold. If the pointer adds more than 2 KB or 5 % instructions, the swap
+  wins or `GUICY_MULTI_WINDOW` keeps it only for apps that ask.
+- **Routing:** each GUICy window (and its GPU child) stores its context in `GWLP_USERDATA`; the
+  window procedure sets the current context from the HWND for every message and puts it back after.
 - **The loop:** one `gy_frame()` serves every window: one wait for all of them, then a frame for
   each window that needs one. Widgets go to a window by `if (gy_window(w)) { ... }`; `gy_frame()`
   returns 0 when the main window closes. `gy_ctx_set(ctx)` is the low-level form for `gy_attach`
@@ -505,9 +541,11 @@ Design:
   back to its old place; FLOAT- or MOVE-locked tiles can't pop out; each window's locks hold in its
   own tree; the saved line records which window a tile is in.
 Proof: two windows in `gytest --windowed` run scripts in turn, each matching its golden; input
-posted to window B never changes window A's state; a pop-out and back gives the same geometry; a
-restored second window doesn't take focus (`GetForegroundWindow` unchanged); idle one tick with
-two windows. Budgets: +5 KB (W group), pop-out +3 KB (full).
+posted to window B never changes window A's state; a pop-out and back gives the same geometry;
+idle one tick with two windows. As a guard, not a proof: window B gets no `WM_ACTIVATE` or
+`WM_NCACTIVATE` with a true flag, `GetActiveWindow()` stays on A, and B has no `WS_EX_TOPMOST`.
+Real focus can't be judged on a hidden desktop, so "a restored window doesn't take focus" is listed
+for the visible run. Budgets: +5 KB (W group), pop-out +3 KB (full).
 
 ### Gated and later
 
@@ -526,7 +564,7 @@ two windows. Budgets: +5 KB (W group), pop-out +3 KB (full).
 
 | Thing | Budget | Today |
 |---|---|---|
-| Core KB, (i) and (ii) | 120 KB | about 86 KB (i) |
+| Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | 120 KB; 140 KB | about 86 KB (i) |
 | Core estimate after P1: F1 +4, H1 +2, D1 +5, L1 +4, G2 +6, T1 +2, X1 +6, P1 +2 | about 117 KB | |
 | GPU path | +20 KB | not built |
 | `hello.exe`, `GUICY_SMALL` | 40 KB of GUICy | not measured |
@@ -550,8 +588,9 @@ first: the DirectWrite fallback off by default (CJK file names show boxes) and I
 
 ## 6. Open questions
 
-For the user: none. Answered: the GPU default ("every case after startup"), the too-small screen
-(zoom to 75 %, then locked sizes give way), and "everything should scale" (D1).
+For the user: none now. **Later, at G1 time, only if the hidden race allows a GPU win:** one
+visible run (section G1), asked through Master Control. It would carry the race with presentation,
+real mouse routing over the GPU child (`GUICY_RENDER=gpu`), and W6's focus check once W6 exists.
 
 For Master Control:
 1. The order insertions in section 2: F1 and H1 before G1, D1 between G1 and L1, X1 between T1
@@ -561,24 +600,18 @@ For Master Control:
 
 ## 7. Risks
 
-1. **The hidden desktop hides presentation.** DXGI reports the window occluded there, so the
-   compositor's cost and frame pacing on a visible screen are not measured, for either path. The
-   race counts the present calls, not what DWM does after them.
+1. **The hidden desktop hides presentation.** Presents there are occluded and may skip their work,
+   and the compositor's cost and pacing aren't seen, for either path. The race counts occluded
+   presents and times the present call alone; a GPU win within that time is not proven, and only a
+   visible run approved by the user can prove it. Until then the CPU is the default.
 2. **Pixels:** if a class of GPU pixels can't be made exact in SM5, the fix goes in the shader, not
    in the tolerance; a rule change goes to Master Control.
-3. **Real mouse routing over the GPU child** (`HTTRANSPARENT` to the parent: clicks, capture,
-   cursor, wheel, drag-and-drop, touch) can't be driven on a hidden desktop. It is the user's check
-   at the first port; the fix if it fails is a forwarder in the child.
-4. **Size:** about 117 of 120 KB is planned for the core after the moves, and `hello.exe` at 40 KB
-   is a guess; the measured trigger and candidates in section 5 are the answer.
-5. **Alt is busy:** tile keys, menu letters and app keys share one clash check; a clash shows a gold
+3. **Real mouse routing over the GPU child** (clicks, capture, cursor, wheel, drag-and-drop, touch)
+   is unverified until the visible run or the first port with `GUICY_RENDER=gpu`; the fix if it
+   fails is a forwarder in the child.
+4. **Alt is busy:** tile keys, menu letters and app keys share one clash check; a clash shows a gold
    banner, never a silent loss.
-6. **Resolution scaling changes what the user sees:** both of the user's monitors go from 100 %
-   to 125 %. It is their intent, shown before/after at the first port; an app can opt out with
-   `gy_scale_mode(GY_SCALE_DPI_ONLY)`.
-7. **IME, fallback glyphs, DPI and monitor changes** are tested with stubbed OS calls and sent
-   messages; a real IME and a real second monitor are the user's check at a port.
-8. **Busy PC:** every number is a median of 3 runs with its spread; GPU and WARP runs are short,
+5. **Busy PC:** every number is a median of 3 runs with its spread; GPU and WARP runs are short,
    WARP only on a small set, other GPU load logged. Work folder size is in each report.
 
 ## 8. Requirements trace
@@ -592,14 +625,14 @@ For Master Control:
 | "easy to import to an EXE" | H1; `GUICY_STATIC` | one define and one compile line; single-file apps need no linker flags, multi-file apps pay (i) or link with gc |
 | "CPU and/or GPU" | G1 | pixel-class rule; forced cpu/gpu/warp; `gy_desc.render`; `GUICY_NO_GPU` |
 | "make sure the GPU is being used too or can be used" | G1 | `gy_renderer_name`, `gpu_draws`, readback tests, the every-case table |
-| "yes to the GPU if it is faster"; "every case after startup" | G1 | GPU default only if it wins all 10 running cases beyond the spread; start cases reported, not decided on |
+| "yes to the GPU if it is faster"; "every case after startup" | G1 | GPU default only if it wins all 10 running cases beyond the spread and beyond its present-call time, confirmed by a visible run the user approves; start cases reported, not decided on |
 | "depending on the resolution everything should scale" | D1 | zero raw sizes; factor-2 instance check; 96/144/192 DPI goldens; 4K picks 200 %, 1440x2560 portrait picks 125 % |
 | every type of window, button, slider, table, list, picker (plus menus, tabs, multi-line edit) | W1-W6, G2, T4 | goldens of every state at 2 DPIs; scripts; equal counts for 100 and 100,000 rows; dialog stub |
 | tiling-WM features | G2, T1-T6 | goldens per layout, zone, workspace, state |
 | other panel alignments | P1 | goldens at 3 widths; resize-sweep rect checks |
 | lock panels, else freely moved | L1 (tiles, splits, docks, windows) | per-flag refusals; fuzz shows unlocked tiles move |
 | "not if the dev locked the windows" | L1 | no override API; hostile line; lock fuzz |
-| too-small screen: zoom to 75 %, then "locked sizes give way" | L1, D1 | stubbed work area at three sizes; sizes return on growth |
+| too-small screen: zoom to 75 % (relative, 5 % steps), then "locked sizes give way" | L1, D1 | stubbed work area at three sizes; sizes return on growth |
 | MC: order G1, L1, G2+T1, T2-T6+P1 | section 2 | kept; insertions in question 1 |
 | MC: advanced tiling behind switches, KB with and without | G2 on, section 3 | size table (iv) every step |
 | MC: animations off, idle one tick | section 3, T6 | baseline.py idle; 0 dirty tiles after a slide |
@@ -610,5 +643,4 @@ For Master Control:
 | MC: no app port without OK, on branches | A1-A3 | gated |
 | MC: tab-overflow » menu | G2 (W2, P1 reuse) | goldens of 8 and 16 tabs at 3 widths; scripted pick |
 | stress fixes (boxes, culling, visible range, lines, bilinear, focus outline) | F1 | budgets and counts in F1 |
-| research: G1 changes, per-monitor DPI v2, IME, lock design (code locks, SPLIT, whole-layout, reset, undo) | G1, D1, X1, L1 | as listed in each step |
 | compare bench lessons | section 1 | what GUICy offers beyond Win32 controls |
