@@ -133,6 +133,7 @@ static HWND g_win_to_destroy;                  /* a test's own app window, close
 #include "h1_tests.inc"
 #include "d1_tests.inc"
 #include "x1_tests.inc"
+#include "a1_tests.inc"
 
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
@@ -190,6 +191,10 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "x1_focus_walk", t_x1_focus_walk },
     { "x1_focus_keys", t_x1_focus_keys },
     { "x1_focus_ring", t_x1_focus_ring },
+    { "a1_shapes_exact", t_a1_shapes_exact },
+    { "a1_shapes", t_a1_shapes },
+    { "a1_shapes_dirty", t_a1_shapes_dirty },
+    { "a1_cut", t_a1_cut },
     { "w_ime", t_w_ime },
     { "x1_no_font", t_x1_no_font },
     { "w_attach", t_w_attach },

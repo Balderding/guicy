@@ -226,6 +226,12 @@ void gy_canvas_line(float x0, float y0, float x1, float y1, float width, gy_colo
 void gy_canvas_dash(float x0, float y0, float x1, float y1, float width, float dash, gy_color c);
 void gy_canvas_text(int x, int y, const char *s, gy_color c);    /* x, y = the top-left of the line */
 void gy_canvas_image(int img, gy_rect r, int smooth);            /* smooth 0: nearest, 1: bilinear */
+/* a filled polygon of n points (x0,y0, x1,y1, ...), any shape: concave, crossing or touching itself;
+   the non-zero winding rule, edges anti-aliased by exact area */
+void gy_canvas_poly(const float *xy, int n, gy_color fill);
+/* an ellipse around cx,cy: fill (0: none), and a border border_w wide inside its edge (0: none),
+   solid or, with dash > 0, dashes of that length (DIPs) */
+void gy_canvas_ellipse(float cx, float cy, float rx, float ry, gy_color fill, gy_color border, float border_w, float dash);
 int  gy_hovered(void);                        /* the mouse is over the last widget */
 int  gy_clicked(int button);                  /* the last widget was clicked with that button */
 float gy_text_width(const char *s);           /* DIPs */
@@ -294,6 +300,14 @@ typedef struct gy__ir { int x, y, w, h; } gy__ir;
 
 /* internal helpers some builds don't call */
 #define GY__FN static __attribute__((unused))
+/* cold code (shapes, tables read once, the IME): built for size, as it never runs per pixel per frame */
+#if defined(__clang__)
+#define GY__SMALL __attribute__((minsize))
+#elif defined(__GNUC__)
+#define GY__SMALL __attribute__((cold))
+#else
+#define GY__SMALL
+#endif
 /* keep the compiler from turning a helper's own loop into a call to the C library's version */
 #if defined(__clang__)
 #define GY__NO_BUILTIN(f) __attribute__((no_builtin(f)))
@@ -374,7 +388,8 @@ static void *gy__arena_push(gy__arena *a, size_t n) {
 }
 
 /* --- the draw list: one 48-byte instance for everything that is drawn --------------------------- */
-enum { GY__K_BOX = 1, GY__K_GLYPH = 2, GY__K_LINE = 3, GY__K_IMAGE = 4 };
+enum { GY__K_BOX = 1, GY__K_GLYPH = 2, GY__K_LINE = 3, GY__K_IMAGE = 4, GY__K_MASK = 5 };   /* MASK: u = this
+                                                  frame's mask, a/b = a hash of its bytes */
 enum { GY__LAYERS = 3 };                       /* 0 the window, 1 popups and menus, 2 tooltips and banners */
 
 typedef struct gy__inst {
@@ -592,6 +607,10 @@ typedef struct gy__ctx {
     int npages, shelf_x, shelf_y, shelf_h;
     unsigned char *scratch;                    /* GetGlyphOutline output */
     int glyph_misses, no_font;
+    uint32_t cut_tip_id;                       /* a hovered widget whose label was cut: its whole text */
+    char cut_tip[256];
+    struct gy__mask { unsigned char *cov; int w; } *masks;   /* this frame's polygon masks (frame arena) */
+    int nmasks;
 
     /* edit box */
     char undo[16][256];
@@ -661,7 +680,7 @@ static int gy__px(float em) {                  /* an em size to whole device pix
     return (int)v - (v < (float)(int)v);       /* floor, without the C library */
 }
 
-static void gy__resolve(void) {
+GY__SMALL static void gy__resolve(void) {
     const gy_theme *t = &gy__c.theme;
     gy__sizes *z = &gy__c.rs;
     float l = gy__c.scale + 0.5f;
@@ -674,7 +693,7 @@ static void gy__resolve(void) {
     z->font_px = gy__px(1.0f);
 }
 
-static void gy__set_error(const char *what, const char *detail) {
+GY__SMALL static void gy__set_error(const char *what, const char *detail) {
     int n = 0, i;
     for (i = 0; what[i] && n < (int)sizeof gy__c.error - 1; i++) gy__c.error[n++] = what[i];
     if (detail) {
@@ -866,7 +885,7 @@ static int gy__cpu_best(void) {
     return GY_ISA_SSE2;
 }
 
-int gy_isa_set(int isa) {
+GY__SMALL int gy_isa_set(int isa) {
     int best = gy__cpu_best();
     if (isa > best) isa = best;
     if (isa < GY_ISA_SCALAR) isa = GY_ISA_SCALAR;
@@ -893,7 +912,7 @@ static void gy__zoom_keys_default(void);
 
 static int gy__ncorners, gy__corner_off;       /* the corner cache (below), whose pages live in the arena */
 
-static int gy__init(void) {
+GY__SMALL static int gy__init(void) {
     char isa[16];
     DWORD n;
     if (gy__c.ready) return 1;
@@ -923,7 +942,7 @@ static int gy__init(void) {
     return 1;
 }
 
-int gy_offscreen(int w, int h) {
+GY__SMALL int gy_offscreen(int w, int h) {
     if (w <= 0 || h <= 0 || w > 16384 || h > 16384) { gy__set_error("gy_offscreen", "the size must be 1..16384"); return 0; }
     if (!gy__init()) return 0;
     /* the frame has its own allocation, freed when the size changes (it used to come from the
@@ -1102,7 +1121,7 @@ static void gy__dash(float x0, float y0, float x1, float y1, float width, float 
    ================================================================================================ */
 
 /* (re)make font f at the current scale: the theme font at the resolved font size, others at dip x scale */
-static int gy__font_build(gy__font *f) {
+GY__SMALL static int gy__font_build(gy__font *f) {
     TEXTMETRICW tm;
     float v = (float)f->dip * gy__c.scale + 0.5f;
     int px = f->dip ? (int)v : gy__c.rs.font_px;
@@ -1122,7 +1141,7 @@ static int gy__font_build(gy__font *f) {
     return 1;
 }
 
-static int gy__font_make(const char *face, int dip, int bold) {
+GY__SMALL static int gy__font_make(const char *face, int dip, int bold) {
     gy__font *f;
     if (gy__c.nfonts >= GY__MAX_FONTS) { gy__set_error("gy_font_add", "16 fonts at most"); return -1; }
     f = &gy__c.fonts[gy__c.nfonts];
@@ -1136,7 +1155,7 @@ static int gy__font_make(const char *face, int dip, int bold) {
 
 /* a new scale: the theme's sizes, every font and the glyph atlas are made again; the next frame is
    a full redraw. Pages of the atlas are kept and reused. */
-static void gy__scale_apply(void) {
+GY__SMALL static void gy__scale_apply(void) {
     float mon = gy__c.scale_mode == GY_SCALE_FIXED ? gy__c.scale_fixed : gy__c.mon_factor;
     float fr = gy__c.user_font > 0 ? (float)gy__c.user_font / (float)gy__c.theme.font_px : 1.0f;
     float ns = (mon > 0 ? mon : 1.0f) * (gy__c.zoom > 0 ? gy__c.zoom : 1.0f) * fr;
@@ -1152,7 +1171,7 @@ static void gy__scale_apply(void) {
 
 /* the monitor factor: max(DPI / 96, the shorter side / 1080) by default, or DPI / 96 only, in
    25 % steps (an exact half rounds up). A portrait screen counts its shorter side. */
-static float gy__factor_of(UINT dpi, int w, int h, int mode) {
+GY__SMALL static float gy__factor_of(UINT dpi, int w, int h, int mode) {
     float f = (float)dpi / 96.0f, r = (float)(w < h ? w : h) / 1080.0f, q;
     if (mode == GY_SCALE_DPI_AND_RESOLUTION && r > f) f = r;
     q = f * 4.0f + 0.5f;
@@ -1160,7 +1179,7 @@ static float gy__factor_of(UINT dpi, int w, int h, int mode) {
     return f < 1.0f ? 1.0f : f;                /* never smaller than 100 % */
 }
 
-static float gy__monitor_factor(HMONITOR m, RECT *work) {
+GY__SMALL static float gy__monitor_factor(HMONITOR m, RECT *work) {
     MONITORINFO mi;
     mi.cbSize = sizeof mi;
     if (!m || !gy__os.monitor_info(m, &mi)) { if (work) SetRect(work, 0, 0, 1920, 1080); return 1.0f; }
@@ -1169,7 +1188,7 @@ static float gy__monitor_factor(HMONITOR m, RECT *work) {
 }
 
 /* the window moved or the screen changed: the factor of the monitor it is on now */
-static void gy__monitor_update(void) {
+GY__SMALL static void gy__monitor_update(void) {
     float f;
     if (!gy__c.hwnd || gy__c.scale_mode == GY_SCALE_FIXED) return;
     f = gy__monitor_factor(MonitorFromWindow(gy__c.hwnd, MONITOR_DEFAULTTONEAREST), NULL);
@@ -1179,7 +1198,7 @@ static void gy__monitor_update(void) {
 /* high contrast: with Windows' high contrast on, the colours come from the system's, and they switch
    live (WM_SETTINGCHANGE); the app's own colours come back when it goes off */
 static gy_color gy__sys(int i) { COLORREF c = GetSysColor(i); return GY_RGB(GetRValue(c), GetGValue(c), GetBValue(c)); }
-static void gy__contrast_check(void) {
+GY__SMALL static void gy__contrast_check(void) {
     HIGHCONTRASTW hc;
     int on;
     gy__memset(&hc, 0, sizeof hc); hc.cbSize = sizeof hc;
@@ -1260,7 +1279,7 @@ static uint32_t gy__be32(const unsigned char *p) { return (uint32_t)p[0] << 24 |
 
 /* read the cmap of hf (selected into the DC) and keep its best Unicode subtable: format 12 (all of
    Unicode) over format 4 (the first 65,536). Every offset is checked against the table's size. */
-static void gy__cmap_load(gy__cmap *m, HFONT hf) {
+GY__SMALL static void gy__cmap_load(gy__cmap *m, HFONT hf) {
     DWORD n;
     unsigned char *t;
     uint32_t i, nt, best = 0;
@@ -1283,7 +1302,7 @@ static void gy__cmap_load(gy__cmap *m, HFONT hf) {
 }
 
 /* the glyph number of character c in table m, 0 when the font doesn't have it */
-static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
+GY__SMALL static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
     const unsigned char *t = m->t;
     uint32_t n = m->n, lo = 0, hi, i;
     if (m->fmt == 12) {
@@ -1316,7 +1335,7 @@ static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
 /* which font draws cp for font f: selects it into the DC; *code and *how become a glyph number when
    it isn't f's own character. The user's language picks the Han face (Japanese, Chinese, Korean). */
 static void gy__fmt(char *out, int cap, const char *f, ...);
-static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
+GY__SMALL static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
     unsigned gid = 0;
     int i, k;
     if (!gy__c.fb_ready) {
@@ -1462,6 +1481,31 @@ static void gy__draw_text_n(int x, int y, const char *s, const char *end, gy_col
 }
 
 static void gy__textxy(int x, int y, const char *s, gy_color c) { if (gy__init()) gy__draw_text_n(x, y, s, NULL, c); }
+
+static int gy__mouse_in(gy__ir r);
+/* a label in maxw px: as it is when it fits; else cut with an ellipsis, and when the widget r is
+   hovered its whole text becomes the tooltip. Returns the width drawn. */
+GY__SMALL static int gy__label_cut(int x, int y, int maxw, const char *s, const char *end, gy_color col, gy__ir r, uint32_t id) {
+    static const char ell[] = "\xe2\x80\xa6";
+    int w = gy__text_w(s, end), ew, k;
+    const char *p = s, *q;
+    if (w <= maxw) { gy__draw_text_n(x, y, s, end, col); return w; }
+    ew = gy__text_w(ell, NULL); w = 0;
+    while (p < end && *p) {
+        int a;
+        q = p;
+        a = gy__glyph_get(gy__c.font, gy__utf8_next(&q))->adv;
+        if (w + a + ew > maxw) break;
+        w += a; p = q;
+    }
+    gy__draw_text_n(x, y, s, p, col);
+    gy__draw_text_n(x + w, y, ell, NULL, col);
+    if (gy__mouse_in(r) && !gy__c.disabled) {
+        for (k = 0; s + k < end && s[k] && k < 255; k++) gy__c.cut_tip[k] = s[k];
+        gy__c.cut_tip[k] = 0; gy__c.cut_tip_id = id;
+    }
+    return w + ew;
+}
 
 /* --- baked icons: drawn once into the atlas by distance to their strokes ------------------------ */
 static float gy__seg_dist2(float px, float py, float ax, float ay, float bx, float by) {   /* squared */
@@ -1818,8 +1862,10 @@ static int gy__button_impl(const char *label, int accent, int key) {
     if (accent) bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.accent : hot ? GY__T.accent_hot : GY__T.accent;
     else bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : GY__T.button;
     gy__box(r, bg, hot ? GY__T.accent : GY__T.border, (float)GY__S.radius, (float)GY__S.line);
-    gy__draw_text_n(r.x + (r.w - gy__text_w(label, end)) / 2, gy__text_y(r), label, end,
-                    gy__c.disabled ? GY__T.text_off : accent ? GY__T.accent_text : GY__T.text);
+    {   int room = r.w - 2 * GY__S.gap, tw = gy__text_w(label, end);
+        gy__label_cut(tw <= room ? r.x + (r.w - tw) / 2 : r.x + GY__S.gap, gy__text_y(r), tw <= room ? tw : room, label, end,
+                      gy__c.disabled ? GY__T.text_off : accent ? GY__T.accent_text : GY__T.text, r, id);
+    }
     return clicked;
 }
 int gy_button(const char *label) { return gy__button_impl(label, 0, 0); }
@@ -1839,7 +1885,7 @@ int gy_check(const char *label, int *on) {
         gy__box(box, gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent, 0, (float)(GY__S.check * 3) / 16.0f, 0);
         gy__draw_icon(GY__I_CHECK, box.x, box.y, size, gy__c.disabled ? GY__T.text_off : GY__T.accent_text);
     } else gy__box(box, hot ? GY__T.field_hot : GY__T.field, hot ? GY__T.accent : GY__T.border, (float)(GY__S.check * 3) / 16.0f, (float)GY__S.line);
-    gy__draw_text_n(r.x + size + GY__S.gap, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    gy__label_cut(r.x + size + GY__S.gap, gy__text_y(r), r.w - size - GY__S.gap, label, end, gy__c.disabled ? GY__T.text_off : GY__T.text, r, id);
     return clicked;
 }
 
@@ -1852,8 +1898,8 @@ int gy_select(const char *label, int on) {
     if (gy__kfocus(id, r)) clicked = 1;
     bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : 0;
     if (bg) gy__rectf(r, bg, (float)GY__S.radius);
-    gy__draw_text_n(r.x + GY__S.gap, gy__text_y(r), label, end,
-                    gy__c.disabled ? GY__T.text_off : on ? GY__T.accent_text : GY__T.text);
+    gy__label_cut(r.x + GY__S.gap, gy__text_y(r), r.w - 2 * GY__S.gap, label, end,
+                  gy__c.disabled ? GY__T.text_off : on ? GY__T.accent_text : GY__T.text, r, id);
     return clicked;
 }
 
@@ -2190,10 +2236,9 @@ int gy_edit(const char *label, char *buf, int cap) {
 void gy_unfocus(void) { gy__c.focus = 0; }
 
 /* --- tooltips ----------------------------------------------------------------------------------------- */
-void gy_tip(const char *text) {
+GY__SMALL static void gy__tip_draw(uint32_t id, const char *text) {
     int w, h, x, y, pad = GY__S.inset;
-    if (gy__c.disabled || !gy__mouse_in(gy__c.last) || gy__c.down[0]) return;
-    if (gy__c.tip_id != gy__c.last_id) { gy__c.tip_id = gy__c.last_id; gy__c.tip_since = gy__c.now; }
+    if (gy__c.tip_id != id) { gy__c.tip_id = id; gy__c.tip_since = gy__c.now; }
     gy__c.tip_shown = 1;
     if (gy__c.now - gy__c.tip_since < 500) { gy_animate((int)(500 - (gy__c.now - gy__c.tip_since))); return; }
     w = gy__text_w(text, NULL) + 2 * pad; h = gy__lineh() + 2 * pad;
@@ -2207,6 +2252,11 @@ void gy_tip(const char *text) {
         gy__textxy(x + pad, y + pad, text, GY__T.text);
         gy__c.layer = saved_layer; GY__L.clip = saved_clip;
     }
+}
+void gy_tip(const char *text) {
+    if (gy__c.disabled || !gy__mouse_in(gy__c.last) || gy__c.down[0]) return;
+    if (gy__c.cut_tip_id == gy__c.last_id) gy__c.cut_tip_id = 0;   /* the app's own tip wins */
+    gy__tip_draw(gy__c.last_id, text);
 }
 
 /* --- popups: combo lists, context menus, the app's own layers ------------------------------------- */
@@ -2440,7 +2490,7 @@ int gy_tree(const char *label) {
     if (gy__button_logic(id, r, &hot, &held) | gy__kfocus(id, r)) st->i0 = !st->i0;
     if (hot) gy__rectf(r, GY__T.button_hot, (float)GY__S.radius);
     gy__draw_icon(st->i0 ? GY__I_DOWN : GY__I_RIGHT, r.x, r.y + (r.h - GY__S.check) / 2, GY__S.check, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
-    gy__draw_text_n(r.x + GY__S.check + GY__S.radius, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    gy__label_cut(r.x + GY__S.check + GY__S.radius, gy__text_y(r), r.w - GY__S.check - GY__S.radius, label, end, gy__c.disabled ? GY__T.text_off : GY__T.text, r, id);
     if (!st->i0) return 0;
     /* the children: an indented area below this row */
     {
@@ -2572,7 +2622,7 @@ static void gy__tile_clash_check(void) {
             }
 }
 
-void gy_keys_owned(const int *keys, int n) {
+GY__SMALL void gy_keys_owned(const int *keys, int n) {
     if (!gy__init()) return;
     gy__c.nowned = gy__mini(n, 64);
     gy__memcpy(gy__c.owned, keys, sizeof(int) * (size_t)gy__c.nowned);
@@ -2959,7 +3009,7 @@ static int gy__tsave(int n, char *b, int cap, int at) {
     return at;
 }
 
-int gy_tiles_save(char *buf, int cap) {
+GY__SMALL int gy_tiles_save(char *buf, int cap) {
     int n;
     if (cap <= 0) return 0;
     if (gy__c.troot < 0) { buf[0] = 0; return 1; }
@@ -3015,7 +3065,7 @@ static int gy__tload(const char **ps, int parent) {
     return n;
 }
 
-int gy_tiles_load(const char *line) {
+GY__SMALL int gy_tiles_load(const char *line) {
     const char *s = line;
     int r, i;
     if (!gy__init() || !line || !*line) return 0;
@@ -3036,7 +3086,7 @@ static const char *const gy__key_names[] = { "Left", "Right", "Up", "Down", "Plu
 static const int gy__key_codes[] = { GY_KEY_LEFT, GY_KEY_RIGHT, GY_KEY_UP, GY_KEY_DOWN, GY_KEY_PLUS, GY_KEY_MINUS, GY_KEY_ENTER, GY_KEY_ESC, GY_KEY_SPACE, GY_KEY_TAB, GY_KEY_HOME, GY_KEY_END, GY_KEY_PGUP, GY_KEY_PGDN, GY_KEY_DELETE };
 
 /* "focus_left=Alt+Left;swap_left=Alt+Shift+Left;..." ("none" = off) */
-int gy_tile_keys_save(char *buf, int cap) {
+GY__SMALL int gy_tile_keys_save(char *buf, int cap) {
     int a, at = 0, i;
     char part[64];
     if (cap <= 0) return 0;
@@ -3057,7 +3107,7 @@ int gy_tile_keys_save(char *buf, int cap) {
     return 1;
 }
 
-int gy_tile_keys_load(const char *s) {
+GY__SMALL int gy_tile_keys_load(const char *s) {
     int ok = 1;
     if (!gy__init() || !s) return 0;
     while (*s) {
@@ -3115,7 +3165,7 @@ static void gy__zoom_keys(void) {
     if (z != gy__c.zoom) { gy__c.zoom = z; gy__scale_apply(); gy__c.passes = gy__maxi(gy__c.passes, 1); }
 }
 
-int gy_view_save(char *buf, int cap) {
+GY__SMALL int gy_view_save(char *buf, int cap) {
     char t[64];
     int n;
     gy__fmt(t, sizeof t, "zoom=%.2f;font=%d", (double)gy__c.zoom, gy__c.user_font ? gy__c.user_font : gy__c.theme.font_px);
@@ -3125,7 +3175,7 @@ int gy_view_save(char *buf, int cap) {
     return 1;
 }
 
-int gy_view_load(const char *line) {
+GY__SMALL int gy_view_load(const char *line) {
     int ok;
     const char *z, *f;
     if (!gy__init() || !line) return 0;
@@ -3189,6 +3239,7 @@ void gy_begin(void) {
     if (gy__c.anim_on && (int)(gy__c.now - gy__c.anim_at) >= 0) gy__c.anim_on = 0;   /* this is the frame it asked for */
     gy__c.frame.used = 0;
     gy__c.inst = NULL; gy__c.ninst = gy__c.cap_inst = 0;
+    gy__c.masks = NULL; gy__c.nmasks = 0; gy__c.cut_tip_id = 0;
     gy__c.nclips = 1; gy__c.layer = 0;
     gy__c.clips[0].x = 0; gy__c.clips[0].y = 0; gy__c.clips[0].w = gy__c.w; gy__c.clips[0].h = gy__c.h;
     gy__c.nlay = 0;
@@ -3513,8 +3564,18 @@ static void gy__draw_image_cpu(const gy__inst *in, gy__ir clip) {
     gy__c.frame.used = mark;
 }
 
+static void gy__draw_mask_cpu(const gy__inst *in, gy__ir clip) {
+    int x0 = gy__maxi(in->x0, clip.x), y0 = gy__maxi(in->y0, clip.y);
+    int x1 = gy__mini(in->x1, clip.x + clip.w), y1 = gy__mini(in->y1, clip.y + clip.h), y;
+    const struct gy__mask *m = &gy__c.masks[in->u];
+    if (x1 <= x0 || y1 <= y0) return;
+    for (y = y0; y < y1; y++)
+        gy__c.k_glyph(gy__c.px + (size_t)y * gy__c.w + x0, m->cov + (size_t)(y - in->y0) * m->w + (x0 - in->x0), x1 - x0, in->col0);
+}
+
 static void gy__draw_inst(const gy__inst *in, gy__ir clip) {
     if (in->kind == GY__K_BOX) gy__draw_box_cpu(in, clip);
+    else if (in->kind == GY__K_MASK) gy__draw_mask_cpu(in, clip);
     else if (in->kind == GY__K_GLYPH) gy__draw_glyph_cpu(in, clip);
     else if (in->kind == GY__K_LINE) gy__draw_line_cpu(in, clip);
     else if (in->kind == GY__K_IMAGE) gy__draw_image_cpu(in, clip);
@@ -3596,6 +3657,7 @@ void gy_end(void) {
     int i;
     if (!gy__c.ready || !gy__c.px) return;
     while (gy__c.nlay > 1) gy__c.nlay--;       /* containers the app left open */
+    if (gy__c.cut_tip_id && !gy__c.down[0]) gy__tip_draw(gy__c.cut_tip_id, gy__c.cut_tip);   /* a cut label's whole text */
     if (gy__c.banner[0]) {                     /* an error banner, on the top layer */
         int h = gy__lineh() + 2 * GY__S.inset;
         gy__c.layer = 2;
@@ -3651,7 +3713,7 @@ static void gy__present(void) {
     ReleaseDC(gy__c.hwnd, wdc);
 }
 
-static int gy__dib(int w, int h) {
+GY__SMALL static int gy__dib(int w, int h) {
     BITMAPINFO bi;
     void *bits = NULL;
     HBITMAP nb;
@@ -3676,7 +3738,7 @@ static int gy__dib(int w, int h) {
    candidate list opens under the caret. Only while an edit box has the keys. ----------------------- */
 typedef struct { DWORD style; POINT pt; RECT area; } gy__compform;              /* COMPOSITIONFORM */
 typedef struct { DWORD index, style; POINT pt; RECT area; } gy__candform;        /* CANDIDATEFORM */
-static int gy__ime_load(void) {
+GY__SMALL static int gy__ime_load(void) {
     static int tried;
     if (!gy__os.imm_get && !tried) {
         HMODULE h = LoadLibraryA("imm32.dll");
@@ -3692,7 +3754,7 @@ static int gy__ime_load(void) {
     return gy__os.imm_get && gy__os.imm_release && gy__os.imm_str && gy__os.imm_comp_win && gy__os.imm_cand_win;
 }
 /* a UTF-16 string from the IME: as typed characters (a commit), or as the composition to draw */
-static void gy__ime_text(const WCHAR *w, int n, int commit, int cur) {
+GY__SMALL static void gy__ime_text(const WCHAR *w, int n, int commit, int cur) {
     int i, o = 0;
     gy__c.ime_cur = 0;
     for (i = 0; i < n; i++) {
@@ -3705,7 +3767,7 @@ static void gy__ime_text(const WCHAR *w, int n, int commit, int cur) {
     if (cur >= n) gy__c.ime_cur = o;
     gy__c.ime[commit ? 0 : o] = 0;
 }
-static void gy__ime_place(HWND hw, void *imc) {   /* the IME's windows at the caret */
+GY__SMALL static void gy__ime_place(HWND hw, void *imc) {   /* the IME's windows at the caret */
     gy__compform cf;
     gy__candform cd;
     gy__memset(&cf, 0, sizeof cf); gy__memset(&cd, 0, sizeof cd);
@@ -3718,7 +3780,7 @@ static void gy__ime_place(HWND hw, void *imc) {   /* the IME's windows at the ca
     gy__os.imm_cand_win(imc, &cd);
     (void)hw;
 }
-static int gy__ime(HWND hw, UINT msg, LPARAM lp) {
+GY__SMALL static int gy__ime(HWND hw, UINT msg, LPARAM lp) {
     void *imc;
     WCHAR w[128];
     LONG n;
@@ -3742,7 +3804,7 @@ static int gy__ime(HWND hw, UINT msg, LPARAM lp) {
 }
 #endif
 
-static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
+GY__SMALL static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
     *res = 0;
     switch (msg) {
     case WM_MOUSEMOVE:
@@ -3862,7 +3924,7 @@ static int gy__desktop_ok(void) {
     return 1;
 }
 
-int gy_attach(void *hwnd) {
+GY__SMALL int gy_attach(void *hwnd) {
     RECT r;
     if (!gy__init() || !hwnd || !gy__desktop_ok()) return 0;
     if (!GetClientRect((HWND)hwnd, &r)) { gy__set_error("gy_attach", "not a window"); return 0; }
@@ -3882,7 +3944,7 @@ int gy_event(void *hwnd, unsigned msg, uintptr_t wp, intptr_t lp) {
 
 int gy_wants_frame(void) { return gy__c.passes > 0 || (gy__c.anim_on && (int)(gy__os.ticks() - gy__c.anim_at) >= 0); }
 
-int gy_open(const gy_desc *d) {
+GY__SMALL int gy_open(const gy_desc *d) {
     WNDCLASSEXW wc;
     WCHAR title[256];
     RECT r;
@@ -3956,7 +4018,7 @@ int gy_frame(void) {
 
 static void gy__put32(unsigned char *p, uint32_t v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24); }
 
-int gy_shot(const char *path) {
+GY__SMALL int gy_shot(const char *path) {
     unsigned char hdr[54];
     uint32_t img = (uint32_t)gy__c.w * (uint32_t)gy__c.h * 4;
     HANDLE f;
@@ -3982,7 +4044,7 @@ int gy_shot(const char *path) {
     return 1;
 }
 
-void gy_shutdown(void) {
+GY__SMALL void gy_shutdown(void) {
     int i;
     for (i = 0; i < gy__c.nfonts; i++) {
         int k;
@@ -4030,6 +4092,195 @@ gy_rect gy_last_rect(void) { return gy__to_dip(gy__c.last); }
 gy_rect gy_avail(void) { return gy__to_dip(gy__avail()); }
 float gy_text_width(const char *s) { return (float)gy__text_w(s, NULL) / gy__c.scale; }
 float gy_line_height(void) { return (float)gy__lineh() / gy__c.scale; }
+
+/* --- filled paths: exact-area coverage --------------------------------------------------------------
+   Each edge adds the signed area it covers to the cells it crosses (acc, one row of w + 2 per pixel
+   row); a running sum along the row is then the winding-weighted coverage of each pixel, and
+   min(|sum|, 1) is the non-zero winding rule, anti-aliased by exact area. The mask goes on the frame
+   as one instance, drawn by the glyph kernel. */
+static float gy__floorf(float v) { int i = (int)v; return (float)(i - (v < (float)i)); }
+GY__SMALL static void gy__acc_edge(float *acc, int w, int h, float x0, float y0, float x1, float y1) {
+    float dir = 1, dxdy, x, t;
+    int y;
+    if (y0 == y1) return;
+    if (y0 > y1) { t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; dir = -1; }
+    dxdy = (x1 - x0) / (y1 - y0);
+    x = x0;
+    if (y0 < 0) { x -= y0 * dxdy; y0 = 0; }
+    for (y = (int)y0; y < h && (float)y < y1; y++) {
+        float ya = gy__maxf((float)y, y0), yb = gy__minf((float)(y + 1), y1), d = (yb - ya) * dir;
+        float xn = x + dxdy * (yb - ya), xa = gy__minf(x, xn), xb = gy__maxf(x, xn), *row = acc + (size_t)y * (size_t)(w + 2);
+        float fa = gy__floorf(xa);
+        int ia = (int)fa, ib = (int)-gy__floorf(-xb);   /* floor(xa), ceil(xb) */
+        if (ib <= ia + 1) {                    /* inside one cell: split by the mean x */
+            float xm = 0.5f * (x + xn) - fa;
+            row[ia] += d - d * xm; row[ia + 1] += d * xm;
+        } else {                               /* across cells: a ramp, full cells, a ramp */
+            float sl = 1.0f / (xb - xa), f0 = xa - fa, a0 = 0.5f * sl * (1 - f0) * (1 - f0);
+            float f1 = xb - (float)ib + 1, am = 0.5f * sl * f1 * f1;
+            int k;
+            row[ia] += d * a0;
+            if (ib == ia + 2) row[ia + 1] += d * (1 - a0 - am);
+            else {
+                float a1 = sl * (1.5f - f0);
+                row[ia + 1] += d * (a1 - a0);
+                for (k = ia + 2; k < ib - 1; k++) row[k] += d * sl;
+                row[ib - 1] += d * (1 - (a1 + (float)(ib - ia - 3) * sl) - am);
+            }
+            row[ib] += d * am;
+        }
+        x = xn;
+    }
+}
+
+/* fill the contours (device px; counts[i] points each) with colour c */
+GY__SMALL static void gy__fill_path(const float *xy, const int *counts, int nc, gy_color c) {
+    gy__ir cl = gy__c.clips[gy__c.nlay ? GY__L.clip : 0];
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f, *acc;
+    int i, j, n = 0, bx, by, w, h, x, y;
+    unsigned char *cov;
+    uint64_t hs = 0x9E3779B97F4A7C15ull;
+    gy__inst *in;
+    if (!c) return;
+    for (i = 0; i < nc; i++) n += counts[i];
+    for (i = 0; i < n; i++) {
+        minx = gy__minf(minx, xy[2 * i]); maxx = gy__maxf(maxx, xy[2 * i]);
+        miny = gy__minf(miny, xy[2 * i + 1]); maxy = gy__maxf(maxy, xy[2 * i + 1]);
+    }
+    if (n < 3) return;
+    bx = gy__maxi((int)gy__floorf(minx), cl.x); by = gy__maxi((int)gy__floorf(miny), cl.y);   /* the box, cut to the clip */
+    w = gy__mini((int)-gy__floorf(-maxx), cl.x + cl.w) - bx; h = gy__mini((int)-gy__floorf(-maxy), cl.y + cl.h) - by;
+    if (w <= 0 || h <= 0) { gy__c.culled++; return; }
+    if (!gy__c.masks) gy__c.masks = (struct gy__mask *)gy__arena_push(&gy__c.frame, sizeof *gy__c.masks * 65536);
+    acc = (float *)gy__arena_push(&gy__c.frame, sizeof(float) * (size_t)(w + 2) * (size_t)h);
+    cov = (unsigned char *)gy__arena_push(&gy__c.frame, (size_t)w * (size_t)h + 8);
+    if (!gy__c.masks || !acc || !cov || gy__c.nmasks == 65536) { gy__set_error("GUICy ran out of memory for shapes", NULL); return; }
+    gy__memset(acc, 0, sizeof(float) * (size_t)(w + 2) * (size_t)h);
+    for (i = 0, j = 0; i < nc; j += counts[i++]) {
+        int k;
+        for (k = 0; k < counts[i]; k++) {      /* each edge, closed; x held to the box (exact for the pixels in it) */
+            const float *a = xy + 2 * (j + k), *b = xy + 2 * (j + (k + 1) % counts[i]);
+            gy__acc_edge(acc, w, h, gy__clampf(a[0] - (float)bx, 0, (float)w), a[1] - (float)by,
+                         gy__clampf(b[0] - (float)bx, 0, (float)w), b[1] - (float)by);
+        }
+    }
+    for (y = 0; y < h; y++) {
+        const float *row = acc + (size_t)y * (size_t)(w + 2);
+        unsigned char *o = cov + (size_t)y * (size_t)w;
+        float sum = 0;
+        for (x = 0; x < w; x++) {
+            float v;
+            sum += row[x];
+            v = gy__absf(sum);
+            o[x] = (unsigned char)(int)((v > 1 ? 1 : v) * 255.0f + 0.5f);
+            hs = (hs ^ o[x]) * 0x100000001B3ull;
+        }
+    }
+    in = gy__push(GY__K_MASK, bx, by, bx + w, by + h);
+    if (!in || in == &gy__c.cull_scratch) return;
+    gy__c.masks[gy__c.nmasks].cov = cov; gy__c.masks[gy__c.nmasks].w = w;
+    in->u = (uint16_t)gy__c.nmasks++;
+    in->col0 = c; in->a = (uint32_t)hs; in->b = (uint32_t)(hs >> 32);
+}
+
+/* an ellipse's points, counter-clockwise from the right, n of them (rotation by a fixed step) */
+GY__SMALL static void gy__ell_pts(float *o, int n, float cx, float cy, float rx, float ry, int backwards) {
+    double t = 6.283185307179586 / (double)n, t2 = t * t;
+    double cs = 1 - t2 / 2 * (1 - t2 / 12 * (1 - t2 / 30)), sn = t * (1 - t2 / 6 * (1 - t2 / 20 * (1 - t2 / 42)));
+    double x = 1, y = 0, q;
+    float grow = gy__sqrtf((float)(t / sn));  /* the polygon's area made the ellipse's: points pushed out by
+                                                  sqrt(step / sin step), so its chords cross the curve */
+    int i;
+    rx *= grow; ry *= grow;
+    for (i = 0; i < n; i++) {
+        int k = backwards ? n - 1 - i : i;
+        o[2 * k] = cx + (float)(x * rx); o[2 * k + 1] = cy - (float)(y * ry);
+        q = x * cs - y * sn; y = x * sn + y * cs; x = q;
+    }
+}
+
+GY__SMALL static int gy__pt_at(float *all, int at, const float *e, int i, int j, float l0, float l1, float at_len) {
+    float t = (at_len - l0) / (l1 - l0);
+    if (at_len == l1) { all[2 * at] = e[2 * j]; all[2 * at + 1] = e[2 * j + 1]; return at + 1; }   /* a vertex: as it is */
+    if (at_len == l0) { all[2 * at] = e[2 * i]; all[2 * at + 1] = e[2 * i + 1]; return at + 1; }
+    all[2 * at] = e[2 * i] + (e[2 * j] - e[2 * i]) * t; all[2 * at + 1] = e[2 * i + 1] + (e[2 * j + 1] - e[2 * i + 1]) * t;
+    return at + 1;
+}
+
+GY__SMALL static void gy__ellipse(float cx, float cy, float rx, float ry, gy_color fill, gy_color border, float bw, float dash) {
+    float rm = gy__maxf(rx, ry), *o, *in_;
+    int n, cnt[2];
+    if (rx <= 0 || ry <= 0) return;
+    n = gy__clampi((int)(6.2832f * gy__sqrtf(rm)) + 1, 12, 1024);   /* the edge strays under 1/16 px */
+    o = (float *)gy__arena_push(&gy__c.frame, sizeof(float) * 4 * (size_t)n);
+    if (!o) return;
+    in_ = o + 2 * n;
+    if (fill) { gy__ell_pts(o, n, cx, cy, rx, ry, 0); cnt[0] = n; gy__fill_path(o, cnt, 1, fill); }
+    if (!border || bw <= 0) return;
+    bw = gy__minf(bw, gy__minf(rx, ry));
+    gy__ell_pts(o, n, cx, cy, rx, ry, 0);
+    gy__ell_pts(in_, n, cx, cy, rx - bw, ry - bw, 0);
+    if (dash <= 0) {                           /* a ring: the outside one way round, the inside the other */
+        gy__ell_pts(in_, n, cx, cy, rx - bw, ry - bw, 1);
+        cnt[0] = cnt[1] = n;
+        gy__fill_path(o, cnt, 2, border);
+    } else {                                   /* dashes: pieces of the ring, dash long, dash apart, along
+                                                  the middle of the band */
+        float *len = (float *)gy__arena_push(&gy__c.frame, sizeof(float) * (size_t)(n + 1));
+        int i, k, nd = 0;
+        if (!len) return;
+        len[0] = 0;
+        for (i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            float mx = 0.5f * (o[2 * j] + in_[2 * j] - o[2 * i] - in_[2 * i]), my = 0.5f * (o[2 * j + 1] + in_[2 * j + 1] - o[2 * i + 1] - in_[2 * i + 1]);
+            len[i + 1] = len[i] + gy__sqrtf(mx * mx + my * my);
+        }
+        {   /* whole dashes and gaps that fit, stretched a little so the ring closes evenly */
+            int pairs = gy__maxi(1, (int)(len[n] / (2 * dash) + 0.5f));
+            float d = len[n] / (float)(2 * pairs);
+            float *all = (float *)gy__arena_push(&gy__c.frame, sizeof(float) * 4 * (size_t)(n + 4 * pairs + 4));
+            int *ac = (int *)gy__arena_push(&gy__c.frame, sizeof(int) * (size_t)pairs), at = 0;
+            if (!all || !ac) return;
+            for (k = 0; k < pairs; k++) {
+                float a = 2 * d * (float)k, b = a + d;
+                int start = at;
+                /* the outside from a to b, then the inside from b back to a */
+                for (i = 0; i < n; i++) {
+                    float l0 = len[i], l1 = len[i + 1];
+                    int j = (i + 1) % n;
+                    if (l1 <= a || l0 >= b) continue;
+                    if (l0 <= a) at = gy__pt_at(all, at, o, i, j, l0, l1, a);
+                    at = gy__pt_at(all, at, o, i, j, l0, l1, l1 < b ? l1 : b);
+                }
+                for (i = n - 1; i >= 0; i--) {
+                    float l0 = len[i], l1 = len[i + 1];
+                    int j = (i + 1) % n;
+                    if (l1 <= a || l0 >= b) continue;
+                    if (l1 >= b) at = gy__pt_at(all, at, in_, i, j, l0, l1, b);
+                    at = gy__pt_at(all, at, in_, i, j, l0, l1, l0 > a ? l0 : a);
+                }
+                ac[nd++] = at - start;
+            }
+            gy__fill_path(all, ac, nd, border);
+        }
+    }
+}
+
+GY__SMALL void gy_canvas_poly(const float *xy, int n, gy_color fill) {
+    float *d;
+    int i;
+    if (!gy__init() || n < 3 || !xy) return;
+    d = (float *)gy__arena_push(&gy__c.frame, sizeof(float) * 2 * (size_t)n);
+    if (!d) return;
+    for (i = 0; i < 2 * n; i++) d[i] = xy[i] * gy__c.scale;
+    gy__fill_path(d, &n, 1, fill);
+}
+GY__SMALL void gy_canvas_ellipse(float cx, float cy, float rx, float ry, gy_color fill, gy_color border, float border_w, float dash) {
+    float k;
+    if (!gy__init()) return;
+    k = gy__c.scale;
+    gy__ellipse(cx * k, cy * k, rx * k, ry * k, fill, border, border_w > 0 ? (float)gy__line_w(border_w) : 0, dash * k);
+}
 
 void gy_canvas_box(gy_rect r, gy_color fill, gy_color border, float radius, float border_w) {
     if (gy__init()) gy__box(gy__from_dip(r), fill, border, radius * gy__c.scale, gy__line_w(border_w));

@@ -57,3 +57,7 @@ x1_focus_keys 0d1af05d6efda8db
 x1_focus_ring bf462c21c7bd24ec
 w_ime 206c0db89def7f1e
 x1_no_font 3d654840479cdfe8
+a1_shapes_exact 47c8413b303a0110
+a1_shapes da16e88ecdcd6da9
+a1_shapes_dirty aea79ed956c1f75e
+a1_cut afabbfa8a20678a6
