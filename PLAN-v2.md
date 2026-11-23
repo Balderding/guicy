@@ -495,7 +495,7 @@ reasons.
 
 | Thing | Budget | Today |
 |---|---|---|
-| Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | 120 KB; 140 KB | **95.7 KB** (i), after F1 |
+| Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | **125 kB** (user, 11-23); 145 kB | **95.7 KB** (i), after F1 |
 
 **KB budget per step** (kB = 1,000 bytes, code + data of `guicy.o`, `GUICY_NO_GPU`; written 2026-11-23 after F1 came in at
 +9.6 KB against its +4 estimate; the actual goes in each done-report beside its budget):
@@ -510,6 +510,8 @@ reasons.
 | L1: locks, the gate function, placement rules, the undo ring | +4 | 118.2 | |
 | A1-A3: the port hooks (timing hook, anything a port's API map finds missing) | +1.5 | **119.7** | |
 | **After D1, measured:** 106.8 + X1 10 + L1 4 + ports 1.5 | | **122.3: past the 120 kB cap** | the stop rule applies before X1 |
+
+**The user's decision (2026-11-23): the core cap is raised to 125 kB,** with everything on by default. The cap stays a hard stop: a step that would pass 125 kB stops before it is built and goes back to the user.
 | G2, T1, P1 default parts | +8 | **127.7: over the cap** | |
 
 **Stop rule (Master Control, 2026-11-23):** if a step's measured size plus the budgets still to come
