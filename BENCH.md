@@ -389,3 +389,35 @@ Found on the way:
 - The golden PNGs for people had gone stale: the hashes were right, but the PNGs were made from
   left-over pictures. gytest now empties `work\out` at the start of a full run, and every PNG was
   made again.
+
+## X1: text and input - fallback glyphs, keyboard focus, IME (PLAN-v2, 2026-11-23)
+
+| | |
+|---|---|
+| Commits | 674c2b4 fallback glyphs, 83796c6 keyboard focus, bbe4376 IME, 3f2d489 gcc fix |
+| Tests | **54/54** normal and **4/4** windowed; every old golden byte-equal |
+| Size | `guicy.o` 104,944 + 10,079 = **115.0 kB**: +8.2 against the +10 budget. With `GUICY_NO_IME` and `GUICY_NO_FALLBACK` 111.0 kB |
+| Examples | hello.c and fifteen.c build clean with clang and MinGW gcc at `-Werror` |
+
+- **Fallback glyphs** (`x1_fallback_100`, `x1_fallback_125`): Japanese, Chinese, Korean, symbols
+  and emoji (above U+FFFF too, which were boxes before) in a mixed list, at 100 % and 125 %. 22 of
+  the 23 non-Latin characters come from a fallback font, 1 is the font's own, 0 have no font. The
+  first frame with every fallback font loaded takes **3.4-4.3 ms** (budget 30 ms); 0 glyph misses
+  after it. The user's language puts its own Han face first (Yu Gothic, YaHei, JhengHei or Malgun).
+  Emoji are one colour: the atlas holds coverage only (colour emoji were out of scope).
+- **Deviation, said plainly:** the plan said DirectWrite with a hand-written
+  `IDWriteTextAnalysisSource`. Instead GUICy reads each font's own `cmap` table (formats 4 and 12,
+  every offset bounds-checked) and takes a missing character from the first of 14 of Windows' own
+  fonts that has it, by glyph number, through the same GDI rasteriser. No COM, about 2 kB against the
+  5-8 planned, and the glyphs look exactly like GDI's. What it gives up: DirectWrite's own fallback
+  list; ours is fixed in the code (`gy__fb_faces`). `GUICY_NO_FALLBACK` drops it.
+- **Keyboard focus** (`x1_focus_walk`, `x1_focus_keys`, `x1_focus_ring`): Tab and Shift+Tab visit all
+  12 widgets of the v1 scene once, in order, and wrap. Enter or Space presses buttons, checks,
+  selects, combos and trees, and starts typing in a number box. Left/Right step sliders and numbers.
+  A Tab into an edit box gives it the keys with all the text selected. The outline shows only after a
+  Tab; a click moves the focus without it, so mouse use looks as before.
+- **IME** (`w_ime`, windowed, imm32 stood in for, real `WM_IME_*` messages): the composition is drawn
+  in the edit box at the caret, underlined, in the fallback font. The candidate window goes under the
+  caret, so it never covers the line. Shown, changed, committed and cancelled all work, typing
+  arrives after it, and undo takes a commit back in one step. imm32 loads at run time, so there is no
+  new library to link. `GUICY_NO_IME` drops it.
