@@ -92,6 +92,12 @@ void gy_animate(int ms);                      /* ask for a frame in ms even with
 void gy_wake(void);                           /* from any thread: run a frame soon */
 void gy_tiles(int on);                        /* 0: redraw every pixel every frame (to test the tiles) */
 
+/* --- an app's own window and loop -------------------------------------------------------------- */
+int  gy_attach(void *hwnd);                   /* draw into the app's window (an HWND); 1 on success */
+int  gy_event(void *hwnd, unsigned msg, uintptr_t wp, intptr_t lp);   /* from the window procedure:
+                                                 1 = GUICy took it (return 0 from the procedure) */
+int  gy_wants_frame(void);                    /* 1: run gy_begin ... gy_end now (input, a timer, gy_wake) */
+
 /* --- the frame without a window (tests, pictures) ---------------------------------------------- */
 int  gy_offscreen(int w, int h);              /* draw into memory; 1 on success */
 void gy_begin(void);                          /* start a frame */
@@ -215,6 +221,13 @@ int  gy_line_height(void);
 #define gy_draw_box gy_canvas_box
 #define gy_draw_text gy_canvas_text
 
+/* --- test builds only (GUICY_TESTS): every text drawn in the last frame, for contrast checks ----- */
+#ifdef GUICY_TESTS
+typedef struct gy_test_text { gy_rect r; gy_color fg; int inst; char s[48]; } gy_test_text;
+int gy_test_texts(const gy_test_text **out);  /* the last frame's texts, in drawing order */
+gy_color gy_test_text_bg(int i);              /* the opaque colour under text i (the box drawn under it) */
+#endif
+
 /* --- fonts, theme, kernels, stats, errors ------------------------------------------------------ */
 int  gy_font_add(const char *face, int px, int bold);   /* returns its index; 0 is the theme's font */
 void gy_font(int i);                                  /* text from here on uses font i */
@@ -252,6 +265,12 @@ const char *gy_last_error(void);              /* "" when there is none */
 
 /* internal helpers some builds don't call */
 #define GY__FN static __attribute__((unused))
+/* keep the compiler from turning a helper's own loop into a call to the C library's version */
+#if defined(__clang__)
+#define GY__NO_BUILTIN(f) __attribute__((no_builtin(f)))
+#else
+#define GY__NO_BUILTIN(f) __attribute__((optimize("no-tree-loop-distribute-patterns")))
+#endif
 
 /* --- no C library inside GUICy: its own small helpers ----------------------------------------- */
 #ifdef GUICY_USE_CRT
@@ -260,18 +279,18 @@ const char *gy_last_error(void);              /* "" when there is none */
 #define gy__memcpy memcpy
 #define gy__memmove memmove
 #else
-__attribute__((no_builtin("memset"))) GY__FN void *gy__memset(void *d, int c, size_t n) {
+GY__NO_BUILTIN("memset") GY__FN void *gy__memset(void *d, int c, size_t n) {
     unsigned char *p = (unsigned char *)d;
     while (n--) *p++ = (unsigned char)c;
     return d;
 }
-__attribute__((no_builtin("memcpy"))) GY__FN void *gy__memcpy(void *d, const void *s, size_t n) {
+GY__NO_BUILTIN("memcpy") GY__FN void *gy__memcpy(void *d, const void *s, size_t n) {
     unsigned char *p = (unsigned char *)d;
     const unsigned char *q = (const unsigned char *)s;
     while (n--) *p++ = *q++;
     return d;
 }
-__attribute__((no_builtin("memmove"))) GY__FN void *gy__memmove(void *d, const void *s, size_t n) {
+GY__NO_BUILTIN("memmove") GY__FN void *gy__memmove(void *d, const void *s, size_t n) {
     unsigned char *p = (unsigned char *)d;
     const unsigned char *q = (const unsigned char *)s;
     if (p < q) while (n--) *p++ = *q++;
@@ -281,9 +300,9 @@ __attribute__((no_builtin("memmove"))) GY__FN void *gy__memmove(void *d, const v
 #endif
 
 #ifdef GUICY_NO_CRT
-__attribute__((no_builtin("memcpy"))) void *memcpy(void *d, const void *s, size_t n) { return gy__memcpy(d, s, n); }
-__attribute__((no_builtin("memset"))) void *memset(void *d, int c, size_t n) { return gy__memset(d, c, n); }
-__attribute__((no_builtin("memmove"))) void *memmove(void *d, const void *s, size_t n) { return gy__memmove(d, s, n); }
+GY__NO_BUILTIN("memcpy") void *memcpy(void *d, const void *s, size_t n) { return gy__memcpy(d, s, n); }
+GY__NO_BUILTIN("memset") void *memset(void *d, int c, size_t n) { return gy__memset(d, c, n); }
+GY__NO_BUILTIN("memmove") void *memmove(void *d, const void *s, size_t n) { return gy__memmove(d, s, n); }
 #endif
 
 static int gy__mini(int a, int b) { return a < b ? a : b; }
@@ -294,7 +313,7 @@ static float gy__maxf(float a, float b) { return a > b ? a : b; }
 static float gy__clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static float gy__absf(float a) { return a < 0 ? -a : a; }
 static float gy__sqrtf(float a) { return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(a))); }
-__attribute__((no_builtin("strlen"))) static int gy__strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+GY__NO_BUILTIN("strlen") static int gy__strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 static int gy__streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 static void gy__strcpy(char *d, const char *s, int cap) { int i = 0; while (s[i] && i < cap - 1) { d[i] = s[i]; i++; } d[i] = 0; }
 
@@ -411,6 +430,14 @@ enum { GY__TA_FOCUS_L, GY__TA_FOCUS_R, GY__TA_FOCUS_U, GY__TA_FOCUS_D, GY__TA_SW
 #define GY__IMAGES 256
 typedef struct gy__image { int w, h; uint32_t gen; uint32_t *px; } gy__image;
 
+/* --- the OS functions GUICy calls where a test may want a stand-in (the test font, the clock) ---- */
+typedef struct gy__os_t {
+    DWORD (WINAPI *glyph_outline)(HDC, UINT, UINT, LPGLYPHMETRICS, DWORD, LPVOID, const MAT2 *);
+    BOOL (WINAPI *text_metrics)(HDC, LPTEXTMETRICW);
+    DWORD (WINAPI *ticks)(void);
+} gy__os_t;
+static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount };
+
 /* --- the context: one, implicit ---------------------------------------------------------------- */
 typedef struct gy__ctx {
     int ready;
@@ -428,6 +455,10 @@ typedef struct gy__ctx {
     gy__inst *inst;
     int ninst, cap_inst, layer;
     int no_cull, culled;                       /* culling: off for a placeholder; how many were skipped */
+#ifdef GUICY_TESTS
+    gy_test_text texts[1024];
+    int ntexts;
+#endif
     gy__inst cull_scratch;                     /* where a culled push writes */
     gy_rect clips[256];
     int nclips;
@@ -508,7 +539,7 @@ typedef struct gy__ctx {
     HWND hwnd;
     HBITMAP dib;
     HDC memdc;
-    int closed, passes, in_frame, resize_w, resize_h, min_w, min_h, tracking;
+    int closed, passes, in_frame, attached, leave_pending, resize_w, resize_h, min_w, min_h, tracking;
     unsigned anim_at;
     int anim_on;
     WCHAR surrogate;
@@ -968,7 +999,7 @@ static int gy__font_make(const char *face, int px, int bold) {
     if (!f->hf) { gy__set_error("gy_font_add could not make the font", face); return -1; }
     SelectObject(gy__c.dc, f->hf);
     gy__c.dc_font = f->hf;
-    GetTextMetricsW(gy__c.dc, &tm);
+    gy__os.text_metrics(gy__c.dc, &tm);
     f->px = px; f->ascent = tm.tmAscent; f->descent = tm.tmDescent; f->height = tm.tmHeight;
     return gy__c.nfonts++;
 }
@@ -1020,10 +1051,10 @@ static gy__glyph *gy__glyph_get(int font, uint32_t cp) {
     if (gy__c.dc_font != gy__c.fonts[font].hf) { SelectObject(gy__c.dc, gy__c.fonts[font].hf); gy__c.dc_font = gy__c.fonts[font].hf; }
     /* two calls: the size, then the bitmap. (One call with a 1 MB buffer was tried in F1: GDI then
        takes 11 times as long and returns different pixels, so the size query stays.) */
-    need = GetGlyphOutlineW(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, 0, NULL, &ident);
+    need = gy__os.glyph_outline(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, 0, NULL, &ident);
     if (need == GDI_ERROR) { gy__memset(&gm, 0, sizeof gm); need = 0; }
     g->adv = (int16_t)gm.gmCellIncX;
-    if (need && need <= (1u << 20) && GetGlyphOutlineW(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, need, gy__c.scratch, &ident) != GDI_ERROR
+    if (need && need <= (1u << 20) && gy__os.glyph_outline(gy__c.dc, cp > 0xFFFF ? 0xFFFD : cp, GGO_GRAY8_BITMAP, &gm, need, gy__c.scratch, &ident) != GDI_ERROR
         && gy__atlas_alloc((int)gm.gmBlackBoxX, (int)gm.gmBlackBoxY, &page, &u, &v)) {
         pitch = ((int)gm.gmBlackBoxX + 3) & ~3;  /* GDI rows are DWORD-aligned */
         for (y = 0; y < (int)gm.gmBlackBoxY; y++)
@@ -1069,17 +1100,28 @@ static const char *gy__label_end(const char *s) {   /* the shown part of a label
 static int gy__text_w(const char *s, const char *end) {
     int w = 0;
     if (!gy__init()) return 0;
-    while (s < end && *s) w += gy__glyph_get(gy__c.font, gy__utf8_next(&s))->adv;
+    while ((!end || s < end) && *s) w += gy__glyph_get(gy__c.font, gy__utf8_next(&s))->adv;
     return w;
 }
 
-int gy_text_width(const char *s) { return gy__text_w(s, s + 0x7FFFFFFF); }
+int gy_text_width(const char *s) { return gy__text_w(s, NULL); }
 
 static void gy__draw_text_n(int x, int y, const char *s, const char *end, gy_color col) {
     int base = y + gy__c.fonts[gy__c.font].ascent;
     gy_rect cl = gy__c.clips[gy__c.nlay ? GY__L.clip : 0];
     if (y >= cl.y + cl.h || y + gy__c.fonts[gy__c.font].height + 8 <= cl.y) { gy__c.culled++; return; }   /* the line is outside the clip */
-    while (s < end && *s) {
+#ifdef GUICY_TESTS
+    if (gy__c.ntexts < 1024 && (!end || s < end) && *s) {
+        gy_test_text *t = &gy__c.texts[gy__c.ntexts++];
+        int k = 0;
+        const char *q = s;
+        while ((!end || q < end) && *q && k < 47) t->s[k++] = *q++;
+        t->s[k] = 0;
+        t->r.x = x; t->r.y = y; t->r.w = gy__text_w(s, end); t->r.h = gy__c.fonts[gy__c.font].height;
+        t->fg = col; t->inst = gy__c.ninst;
+    }
+#endif
+    while ((!end || s < end) && *s) {   /* end NULL: to the terminating zero */
         if (x >= cl.x + cl.w + 8) break;       /* the rest of the line is right of the clip (8: overhangs) */
         gy__glyph *g = gy__glyph_get(gy__c.font, gy__utf8_next(&s));
         if (g->ok && g->w) {
@@ -1091,7 +1133,7 @@ static void gy__draw_text_n(int x, int y, const char *s, const char *end, gy_col
     }
 }
 
-void gy_canvas_text(int x, int y, const char *s, gy_color c) { if (gy__init()) gy__draw_text_n(x, y, s, s + 0x7FFFFFFF, c); }
+void gy_canvas_text(int x, int y, const char *s, gy_color c) { if (gy__init()) gy__draw_text_n(x, y, s, NULL, c); }
 
 /* --- baked icons: drawn once into the atlas by distance to their strokes ------------------------ */
 static float gy__seg_dist2(float px, float py, float ax, float ay, float bx, float by) {   /* squared */
@@ -1378,7 +1420,7 @@ static void gy__text_v(gy_color col, const char *fmt, va_list ap) {
     char buf[1024];
     gy_rect r = gy__next();
     gy__vfmt(buf, sizeof buf, fmt, ap);
-    gy__draw_text_n(r.x, gy__text_y(r), buf, buf + sizeof buf, gy__c.disabled ? GY__T.text_off : col);
+    gy__draw_text_n(r.x, gy__text_y(r), buf, NULL, gy__c.disabled ? GY__T.text_off : col);
 }
 
 void gy_text(const char *fmt, ...) { va_list ap; va_start(ap, fmt); gy__text_v(GY__T.text, fmt, ap); va_end(ap); }
@@ -1504,7 +1546,7 @@ static int gy__slider_core(const char *label, float *v, float lo, float hi, floa
     gy_canvas_box(knob, gy__c.disabled ? GY__T.button : hot || held ? GY__T.accent_hot : GY__T.text, GY__T.border, 6, 1);
     gy__draw_text_n(r.x, r.y + 1, label, end, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
     tw = gy_text_width(shown);
-    gy__draw_text_n(r.x + r.w - tw, r.y + 1, shown, shown + 64, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    gy__draw_text_n(r.x + r.w - tw, r.y + 1, shown, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
     return changed;
 }
 
@@ -1578,7 +1620,7 @@ static int gy__number_core(const char *label, float *v, float step, float lo, fl
         gy__draw_icon(GY__I_MINUS, bl.x + 3, bl.y + (bl.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : hl ? GY__T.accent_hot : GY__T.text_dim);
         gy__draw_icon(GY__I_PLUS, br.x + 3, br.y + (br.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : hr2 ? GY__T.accent_hot : GY__T.text_dim);
         if (is_int) gy__fmt(s, sizeof s, "%d", (int)*v); else gy__fmt(s, sizeof s, "%.2f", (double)*v);
-        gy__draw_text_n(mid.x + (mid.w - gy_text_width(s)) / 2, gy__text_y(mid), s, s + 64, gy__c.disabled ? GY__T.text_off : GY__T.text);
+        gy__draw_text_n(mid.x + (mid.w - gy_text_width(s)) / 2, gy__text_y(mid), s, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
     }
     changed = *v != old;
     return changed;
@@ -1740,7 +1782,7 @@ static int gy__edit_core(uint32_t id, gy_rect r, char *buf, int cap, int numeric
             int saved = GY__L.clip;
             GY__L.clip = clip;
             if (focused && a != b) gy_canvas_rect((gy_rect){ x0 + gy__text_w(buf, buf + a), ty, gy__text_w(buf + a, buf + b), gy_line_height() }, GY__T.select, 0);
-            gy__draw_text_n(x0, ty, buf, buf + len + cap, gy__c.disabled ? GY__T.text_off : GY__T.text);
+            gy__draw_text_n(x0, ty, buf, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
             if (focused) {                     /* the caret blinks: on 530 ms, off 530 ms */
                 unsigned t = gy__c.now - (unsigned)st->i2;
                 if ((t / 530) % 2 == 0) gy_canvas_rect((gy_rect){ x0 + cx, ty, 1, gy_line_height() }, GY__T.text, 0);
@@ -1821,7 +1863,7 @@ int gy_combo(const char *label, int *sel, const char *items) {
     }
     gy_canvas_box(r, hot ? GY__T.button_hot : GY__T.button, hot || gy__c.popup_id == id ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
     for (it = items, i = 0; *it && i < *sel; it += gy__strlen(it) + 1) i++;
-    if (*it) gy__draw_text_n(r.x + GY__T.gap, gy__text_y(r), it, it + 256, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    if (*it) gy__draw_text_n(r.x + GY__T.gap, gy__text_y(r), it, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
     gy__draw_icon(GY__I_DOWN, r.x + r.w - 20, r.y + (r.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
     if (gy__c.popup_id == id) {                /* the open list, on the popup layer */
         int saved_row = GY__L.row_h;
@@ -2653,10 +2695,32 @@ int gy_tile_keys_load(const char *s) {
    The frame
    ================================================================================================ */
 
+static int gy__dib(int w, int h);
+
+#ifdef GUICY_TESTS
+int gy_test_texts(const gy_test_text **out) { *out = gy__c.texts; return gy__c.ntexts; }
+
+gy_color gy_test_text_bg(int i) {
+    int k, cx, cy;
+    if (i < 0 || i >= gy__c.ntexts) return gy__c.theme.bg;
+    cx = gy__c.texts[i].r.x + gy__c.texts[i].r.w / 2; cy = gy__c.texts[i].r.y + gy__c.texts[i].r.h / 2;
+    for (k = gy__mini(gy__c.texts[i].inst, gy__c.ninst) - 1; k >= 0; k--) {   /* the last opaque box under its middle */
+        const gy__inst *in = &gy__c.inst[k];
+        gy_rect cl = gy__c.clips[in->clip];
+        if (in->kind == GY__K_BOX && (in->col0 >> 24) == 255 && cx >= in->x0 && cx < in->x1 && cy >= in->y0 && cy < in->y1
+            && cx >= cl.x && cy >= cl.y && cx < cl.x + cl.w && cy < cl.y + cl.h) return in->col0;
+    }
+    return gy__c.theme.bg;
+}
+#endif
+
 void gy_begin(void) {
     gy__lay *l;
     if (!gy__init()) return;
-    if (!gy__c.test_clock) gy__c.now = GetTickCount();
+    if (!gy__c.test_clock) gy__c.now = gy__os.ticks();
+    if (gy__c.hwnd && gy__c.resize_w && (gy__c.resize_w != gy__c.w || gy__c.resize_h != gy__c.h)) gy__dib(gy__c.resize_w, gy__c.resize_h);
+    gy__c.resize_w = gy__c.resize_h = 0;
+    if (gy__c.attached && gy__c.passes > 0) gy__c.passes--;   /* an app's own loop: this frame is one of the asked-for passes */
     if (gy__c.anim_on && (int)(gy__c.now - gy__c.anim_at) >= 0) gy__c.anim_on = 0;   /* this is the frame it asked for */
     gy__c.frame.used = 0;
     gy__c.inst = NULL; gy__c.ninst = gy__c.cap_inst = 0;
@@ -2669,6 +2733,9 @@ void gy_begin(void) {
     gy__c.nblock_cur = 0; gy__c.popup_used = 0; gy__c.tip_shown = 0; gy__c.focus_claimed = 0;
     gy__c.in_tile = 0;
     gy__c.in_frame = 1;
+#ifdef GUICY_TESTS
+    gy__c.ntexts = 0;
+#endif
 }
 
 /* --- dirty tiles ---------------------------------------------------------------------------------
@@ -3092,6 +3159,7 @@ void gy_end(void) {
     gy__c.frames++;
     if (gy__c.dirty_tiles) { gy__c.frames_drawn++; if (gy__c.hwnd) gy__present(); }
     if (gy__c.released[0]) gy__c.active = 0;
+    if (gy__c.leave_pending && !(gy__c.down[0] | gy__c.down[1] | gy__c.down[2])) { gy_input_mouse(-32768, -32768); gy__c.leave_pending = 0; gy__c.passes = gy__maxi(gy__c.passes, 1); }
     gy__memset(gy__c.pressed, 0, sizeof gy__c.pressed);
     gy__memset(gy__c.released, 0, sizeof gy__c.released);
     gy__memset(gy__c.dbl, 0, sizeof gy__c.dbl);
@@ -3137,7 +3205,9 @@ static int gy__dib(int w, int h) {
     return 1;
 }
 
-static LRESULT CALLBACK gy__wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+/* every message GUICy cares about, for its own window and for an app's (gy_event); 1 = taken */
+static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
+    *res = 0;
     switch (msg) {
     case WM_MOUSEMOVE:
         if (!gy__c.tracking) {
@@ -3145,61 +3215,107 @@ static LRESULT CALLBACK gy__wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
             te.cbSize = sizeof te; te.dwFlags = TME_LEAVE; te.hwndTrack = hw; te.dwHoverTime = 0;
             gy__c.tracking = TrackMouseEvent(&te);
         }
-        gy_input_mouse((short)LOWORD(lp), (short)HIWORD(lp)); gy__c.passes = 2; return 0;
-    case WM_MOUSELEAVE: gy__c.tracking = 0; gy_input_mouse(-32768, -32768); gy__c.passes = 2; return 0;
+        gy_input_mouse((short)LOWORD(lp), (short)HIWORD(lp)); gy__c.passes = 2; return 1;
+    case WM_MOUSELEAVE:                        /* the mouse left the window; while a click is being handled it waits for the frame's end */
+        gy__c.tracking = 0;
+        if (gy__c.down[0] | gy__c.down[1] | gy__c.down[2] | gy__c.pressed[0] | gy__c.pressed[1] | gy__c.pressed[2]
+            | gy__c.released[0] | gy__c.released[1] | gy__c.released[2]) gy__c.leave_pending = 1;
+        else gy_input_mouse(-32768, -32768);
+        gy__c.passes = 2; return 1;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
     case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK: case WM_MBUTTONDBLCLK:
         SetCapture(hw);
-        gy__c.now = GetTickCount();
+        if (!gy__c.test_clock) gy__c.now = gy__os.ticks();
+        gy_input_mouse((short)LOWORD(lp), (short)HIWORD(lp));   /* a click carries its own place: never one left over from before a leave */
         gy_input_button(msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK ? 0 : msg == WM_RBUTTONDOWN || msg == WM_RBUTTONDBLCLK ? 1 : 2, 1);
-        gy__c.passes = 2; return 0;
+        gy__c.passes = 2; return 1;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
         ReleaseCapture();
-        gy_input_button(msg == WM_LBUTTONUP ? 0 : msg == WM_RBUTTONUP ? 1 : 2, 0); gy__c.passes = 2; return 0;
-    case WM_MOUSEWHEEL: gy_input_wheel((float)(short)HIWORD(wp) / 120.0f); gy__c.passes = 2; return 0;
+        gy_input_mouse((short)LOWORD(lp), (short)HIWORD(lp));
+        gy_input_button(msg == WM_LBUTTONUP ? 0 : msg == WM_RBUTTONUP ? 1 : 2, 0); gy__c.passes = 2; return 1;
+    case WM_MOUSEWHEEL: gy_input_wheel((float)(short)HIWORD(wp) / 120.0f); gy__c.passes = 2; return 1;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
-        if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;   /* Alt+F4 still closes */
-        gy_input_key((int)wp, 1); gy__c.passes = 2; return 0;
-    case WM_KEYUP: case WM_SYSKEYUP: gy_input_key((int)wp, 0); gy__c.passes = gy__maxi(gy__c.passes, 1); return 0;
-    case WM_SYSCHAR: return 0;                 /* no beep for Alt+key */
+        if (msg == WM_SYSKEYDOWN && wp == VK_F4) return 0;   /* Alt+F4 still closes */
+        gy_input_key((int)wp, 1); gy__c.passes = 2; return 1;
+    case WM_KEYUP: case WM_SYSKEYUP: gy_input_key((int)wp, 0); gy__c.passes = gy__maxi(gy__c.passes, 1); return 1;
+    case WM_SYSCHAR: return 1;                 /* no beep for Alt+key */
     case WM_CHAR: {
         WCHAR c = (WCHAR)wp;
-        if (c >= 0xD800 && c < 0xDC00) { gy__c.surrogate = c; return 0; }
+        if (c >= 0xD800 && c < 0xDC00) { gy__c.surrogate = c; return 1; }
         if (c >= 0xDC00 && c < 0xE000 && gy__c.surrogate) { gy_input_char(0x10000u + (((uint32_t)gy__c.surrogate - 0xD800u) << 10) + (c - 0xDC00u)); gy__c.surrogate = 0; }
         else gy_input_char(c);
-        gy__c.passes = 2; return 0;
+        gy__c.passes = 2; return 1;
     }
     case WM_SETFOCUS: case WM_KILLFOCUS: gy__memset(gy__c.keys_down, 0, sizeof gy__c.keys_down); gy__mods_update(); return 0;
-    case WM_SIZE:
+    case WM_SIZE:                              /* noted; the frame is resized at the next gy_begin (not taken: the app may want it too) */
         if (wp != SIZE_MINIMIZED) { gy__c.resize_w = LOWORD(lp); gy__c.resize_h = HIWORD(lp); gy__c.passes = 2; }
         return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mm = (MINMAXINFO *)lp;
         RECT r = { 0, 0, gy__c.min_w, gy__c.min_h };
+        if (!gy__c.min_w) return 0;
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-        if (gy__c.min_w) { mm->ptMinTrackSize.x = r.right - r.left; mm->ptMinTrackSize.y = r.bottom - r.top; }
-        return 0;
+        mm->ptMinTrackSize.x = r.right - r.left; mm->ptMinTrackSize.y = r.bottom - r.top;
+        return 1;
     }
-    case WM_ERASEBKGND: return 1;              /* the frame covers everything */
+    case WM_ERASEBKGND: *res = 1; return 1;    /* the frame covers everything */
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hw, &ps);
         if (gy__c.memdc) BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
                                 ps.rcPaint.bottom - ps.rcPaint.top, gy__c.memdc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
         EndPaint(hw, &ps);
-        return 0;
+        return 1;
     }
-    case WM_CLOSE: gy__c.closed = 1; return 0;
-    case WM_APP + 1: gy__c.passes = gy__maxi(gy__c.passes, 1); return 0;   /* gy_wake */
+    case WM_APP + 1: gy__c.passes = gy__maxi(gy__c.passes, 1); return 1;   /* gy_wake */
     }
+    return 0;
+}
+
+static LRESULT CALLBACK gy__wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    LRESULT res;
+    if (msg == WM_CLOSE) { gy__c.closed = 1; return 0; }
+    if (gy__handle(hw, msg, wp, lp, &res)) return res;
     return DefWindowProcW(hw, msg, wp, lp);
 }
+
+/* windowed tests must never put a window on the user's screen: in a test build (GUICY_TESTS),
+   gy_open and gy_attach refuse on the Default desktop (gytest --windowed runs on its own) */
+static int gy__desktop_ok(void) {
+#ifdef GUICY_TESTS
+    WCHAR name[64];
+    DWORD need = 0;
+    name[0] = 0;
+    GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, name, sizeof name, &need);
+    if (!lstrcmpiW(name, L"Default")) { gy__set_error("GUICy test build: windows only on a test desktop", "run gytest --windowed"); return 0; }
+#endif
+    return 1;
+}
+
+int gy_attach(void *hwnd) {
+    RECT r;
+    if (!gy__init() || !hwnd || !gy__desktop_ok()) return 0;
+    if (!GetClientRect((HWND)hwnd, &r)) { gy__set_error("gy_attach", "not a window"); return 0; }
+    gy__c.memdc = CreateCompatibleDC(NULL);
+    if (!gy__c.memdc || !gy__dib(gy__maxi(r.right, 1), gy__maxi(r.bottom, 1))) return 0;
+    gy__c.hwnd = (HWND)hwnd; gy__c.attached = 1;
+    gy__c.passes = 2;
+    return 1;
+}
+
+int gy_event(void *hwnd, unsigned msg, uintptr_t wp, intptr_t lp) {
+    LRESULT res;
+    if (!gy__c.ready || (HWND)hwnd != gy__c.hwnd) return 0;
+    return gy__handle((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)lp, &res);
+}
+
+int gy_wants_frame(void) { return gy__c.passes > 0 || (gy__c.anim_on && (int)(gy__os.ticks() - gy__c.anim_at) >= 0); }
 
 int gy_open(const gy_desc *d) {
     WNDCLASSEXW wc;
     WCHAR title[256];
     RECT r;
-    if (!gy__init()) return 0;
+    if (!gy__init() || !gy__desktop_ok()) return 0;
     gy__memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc; wc.lpfnWndProc = gy__wndproc; wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW); wc.lpszClassName = L"GUICy";
@@ -3236,14 +3352,12 @@ int gy_frame(void) {
             TranslateMessage(&m); DispatchMessageW(&m);
         }
         if (gy__c.closed) return 0;
-        if (gy__c.anim_on && (int)(GetTickCount() - gy__c.anim_at) >= 0) { gy__c.anim_on = 0; gy__c.passes = gy__maxi(gy__c.passes, 1); }
+        if (gy__c.anim_on && (int)(gy__os.ticks() - gy__c.anim_at) >= 0) { gy__c.anim_on = 0; gy__c.passes = gy__maxi(gy__c.passes, 1); }
         if (gy__c.passes > 0) break;
-        MsgWaitForMultipleObjectsEx(0, NULL, gy__c.anim_on ? (DWORD)gy__maxi(0, (int)(gy__c.anim_at - GetTickCount())) : INFINITE,
+        MsgWaitForMultipleObjectsEx(0, NULL, gy__c.anim_on ? (DWORD)gy__maxi(0, (int)(gy__c.anim_at - gy__os.ticks())) : INFINITE,
                                     QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
     gy__c.passes--;                            /* an input event gets two passes: the second settles */
-    if (gy__c.resize_w && (gy__c.resize_w != gy__c.w || gy__c.resize_h != gy__c.h)) gy__dib(gy__c.resize_w, gy__c.resize_h);
-    gy__c.resize_w = gy__c.resize_h = 0;
     gy_begin();
     return 1;
 }
@@ -3286,7 +3400,7 @@ void gy_shutdown(void) {
     for (i = 1; i < GY__IMAGES; i++) if (gy__c.img[i].px) HeapFree(GetProcessHeap(), 0, gy__c.img[i].px);
     if (gy__c.off_px) HeapFree(GetProcessHeap(), 0, gy__c.off_px);
     if (gy__c.dc) DeleteDC(gy__c.dc);
-    if (gy__c.hwnd) DestroyWindow(gy__c.hwnd);
+    if (gy__c.hwnd && !gy__c.attached) DestroyWindow(gy__c.hwnd);   /* an attached window is the app's */
     if (gy__c.dib) DeleteObject(gy__c.dib);
     if (gy__c.memdc) DeleteDC(gy__c.memdc);
     if (gy__c.perm.base) VirtualFree(gy__c.perm.base, 0, MEM_RELEASE);

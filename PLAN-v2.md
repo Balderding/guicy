@@ -497,13 +497,13 @@ reasons.
 |---|---|---|
 | Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | 120 KB; 140 KB | **95.7 KB** (i), after F1 |
 
-**KB budget per step** (code + data of `guicy.o`, `GUICY_NO_GPU`; written 2026-11-23 after F1 came in at
+**KB budget per step** (kB = 1,000 bytes, code + data of `guicy.o`, `GUICY_NO_GPU`; written 2026-11-23 after F1 came in at
 +9.6 KB against its +4 estimate; the actual goes in each done-report beside its budget):
 
 | Step | Budget | Running total | Measured |
 |---|---|---|---|
 | (F1 done) | +4 (estimate) | | **+9.6, total 95.7** |
-| H1: gy_attach/gy_event, the OS table, the test desktop guard, the test font hook, the text-record hook (tests only) | +2.5 | 98.2 | |
+| H1: gy_attach/gy_event, the OS table, the test desktop guard, the test font hook, the text-record hook (tests only) | +2.5 | 98.2 | **+2.1, total 97.8** |
 | G0: the spike lives in `bench/gyspike.c`, outside guicy.h | 0 | 98.2 | |
 | D1: one scale function, the em theme resolved per factor, monitors, zoom keys, high contrast | +6 | 104.2 | |
 | X1: DirectWrite fallback glyphs (5-8), IME (1.5), Tab/Shift+Tab focus (1) | +10 | 114.2 | |

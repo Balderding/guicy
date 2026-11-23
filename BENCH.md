@@ -283,3 +283,26 @@ That's +9.6 KB for F1 against the +4 KB estimate, leaving 24 KB of the 120 KB co
 
 Demo window, hidden desktop, 3 runs: idle 0, 15.6 and 31.2 ms per 60 s (0 to 2 scheduler ticks);
 per mouse move 0.16, 0.33 and 0.23 ms (the PC was busy).
+
+## H1: an app's own window, the test desktop, the test font (PLAN-v2, 2026-11-23)
+
+| Thing | Number |
+|---|---|
+| New API | `gy_attach(hwnd)`, `gy_event(hwnd, msg, wp, lp)` (1 = taken), `gy_wants_frame()`; the app runs `gy_begin`..`gy_end` itself |
+| Tests | **37/37** normal (`gytest`) and **2/2** windowed (`gytest --windowed`, relaunched on its own desktop) |
+| `w_attach` | an app-made window driven through `gy_event`: the same instance list and the same pixels as off screen, through hovers and a click |
+| `w_open` | `gy_open` + `gy_frame` driven by posted messages: 14 frames run, the same instance list and pixels as off screen |
+| `h1_guard` | in a test build, `gy_open` and `gy_attach` refuse on the Default desktop, with a plain error |
+| `h1_texts` | the text-record hook lists 26 texts of the v1 scene with their colour and the colour under them (Build on the button colour, Name on the bg) |
+| `h1_test_font` | the synthetic font, through the OS table: at 16/32/48 px, widths 24/48/72, lines 16/32/48, glyph boxes exactly 2x |
+| Examples | `examples/hello.c` and `examples/fifteen.c` build from a bare folder with clang **and MinGW gcc 16.2**, both at `-Werror` (`build.cmd examples`); hello.exe 157 KB with clang, 166 KB with gcc (all of GUICy + the static C runtime; the plan's optional `GUICY_SMALL` isn't built) |
+| Size | `guicy.o` 89,712 + 8,082 = **97.8 kB** (+2.1 against the +2.5 budget) |
+
+Found and fixed while making the windowed tests honest:
+- **Clicks use their own position.** A click now takes its position from the button message itself.
+- **A late mouse-leave waits for the frame.** A mouse-leave that arrives while a click is being
+  handled now waits for the end of the frame. Before, a fast click and a quick leave could lose the
+  click. The hidden desktop showed it: Windows queues the leave after the button messages.
+- **No more made-up end pointers.** gcc found `s + 0x7FFFFFFF`, which is undefined behaviour in C.
+  Text functions now take NULL for "to the end".
+- **gcc gets its own no-builtin attribute** (`optimize("no-tree-loop-distribute-patterns")`).

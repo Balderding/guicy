@@ -32,3 +32,8 @@ f1_cull 17e068c88874809c
 f1_corner_cache dacfd42c1be3a32d
 old_layouts 6bb7ae73f6e5167b
 fix_tile_min e8ed9a2ddfdfada3
+h1_guard 6bb7ae73f6e5167b
+h1_texts 49ce68435f6a2f22
+h1_test_font 155f9904ec02bad3
+w_attach 0bdfc76043923770
+w_open 0bdfc76043923770

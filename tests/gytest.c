@@ -128,7 +128,9 @@ static int t_tiles(void) {
     return 1;
 }
 
+static HWND g_win_to_destroy;                  /* a test's own app window, closed after gy_shutdown */
 #include "v1_tests.inc"
+#include "h1_tests.inc"
 
 typedef int (*test_fn)(void);
 static const struct { const char *name; test_fn fn; } TESTS[] = {
@@ -166,6 +168,11 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "f1_corner_cache", t_f1_corner_cache },
     { "old_layouts", t_old_layouts },
     { "fix_tile_min", t_fix_tile_min },
+    { "h1_guard", t_h1_guard },
+    { "h1_texts", t_h1_texts },
+    { "h1_test_font", t_h1_test_font },
+    { "w_attach", t_w_attach },
+    { "w_open", t_w_open },
 };
 #define NTESTS ((int)(sizeof TESTS / sizeof TESTS[0]))
 
@@ -206,13 +213,46 @@ static void save_hashes(const char *path) {
 
 static uint64_t frame_hash(void) { return fnv64(gy_pixels(), gy_width() * gy_height(), gy_width(), gy_height()); }
 
+/* gytest --windowed: the w_* tests need real windows, so gytest runs itself again on a desktop of
+   its own (never the user's), inherits this console, and returns its exit code */
+static int on_default_desktop(void) {
+    WCHAR name[64];
+    DWORD need = 0;
+    name[0] = 0;
+    GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, name, sizeof name, &need);
+    return !lstrcmpiW(name, L"Default");
+}
+static int relaunch_on_test_desktop(void) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    HDESK desk = CreateDesktopW(L"gytest_windowed", NULL, NULL, 0, GENERIC_ALL, NULL);
+    DWORD code = 99;
+    WCHAR *cmd = GetCommandLineW(), desk_name[] = L"gytest_windowed";
+    if (!desk) { printf("FAIL --windowed: CreateDesktop failed (%lu)\n", GetLastError()); return 1; }
+    memset(&si, 0, sizeof si); si.cb = sizeof si; si.lpDesktop = desk_name;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE); si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE); si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    fflush(stdout);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) { printf("FAIL --windowed: CreateProcess failed (%lu)\n", GetLastError()); CloseDesktop(desk); return 1; }
+    WaitForSingleObject(pi.hProcess, 300000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseDesktop(desk);
+    return (int)code;
+}
+
 int main(int argc, char **argv) {
     char out[MAX_PATH], hashes[MAX_PATH], *s;
-    int update = 0, fails = 0, ran = 0, i, a, named = 0, shots = 0;
+    int update = 0, fails = 0, ran = 0, i, a, named = 0, shots = 0, windowed = 0;
     GetModuleFileNameA(NULL, g_root, MAX_PATH);
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\build */
     if ((s = strrchr(g_root, '\\'))) *s = 0;   /* ...\guicy */
-    for (a = 1; a < argc; a++) { if (!strcmp(argv[a], "--update")) update = 1; else if (!strcmp(argv[a], "--shots")) shots = 1; else named = 1; }
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--update")) update = 1;
+        else if (!strcmp(argv[a], "--shots")) shots = 1;
+        else if (!strcmp(argv[a], "--windowed")) windowed = 1;
+        else named = 1;
+    }
+    if (windowed && on_default_desktop()) return relaunch_on_test_desktop();
     snprintf(out, sizeof out, "%s\\work", g_root); CreateDirectoryA(out, NULL);
     snprintf(out, sizeof out, "%s\\work\\out", g_root); CreateDirectoryA(out, NULL);
     snprintf(hashes, sizeof hashes, "%s\\tests\\golden\\hashes.txt", g_root);
@@ -223,6 +263,7 @@ int main(int argc, char **argv) {
         int want = !named, isa, ok = 1, k;
         for (a = 1; a < argc && !want; a++) if (!strcmp(argv[a], TESTS[i].name)) want = 1;
         if (!want) continue;
+        if ((TESTS[i].name[0] == 'w' && TESTS[i].name[1] == '_') != windowed) continue;   /* w_* only under --windowed */
         ran++;
         g_log[0] = 0;
         for (isa = GY_ISA_AVX2; isa >= GY_ISA_SCALAR; isa--) {
@@ -236,6 +277,7 @@ int main(int argc, char **argv) {
                     && !gy_shot(out)) { ok = 0; break; }
             }
             gy_shutdown();
+            if (g_win_to_destroy) { DestroyWindow(g_win_to_destroy); g_win_to_destroy = NULL; }
         }
         if (!ok) { printf("FAIL %s: %s%s\n", TESTS[i].name, g_log, gy_last_error()); fails++; gy_shutdown(); continue; }
         if (h[0] != h[1] || h[1] != h[2]) {
