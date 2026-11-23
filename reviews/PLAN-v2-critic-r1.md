@@ -348,7 +348,7 @@ Severity: **P1** = the plan is wrong or a proof can't be done as written; **P2**
     `GUICY_TESTS` switch, so the +20 KB isn't spent on bench code.
 31. **P3.** The first DirectWrite fallback loads dwrite and the system font collection, a
     one-time spike of several ms. Budget it in X1.
-32. **P3.** Section 3's scan list should name "<scan word>" and X:\ and O:\ paths, as AGENT_RULES.md:12
+32. **P3.** Section 3's scan list should name the user's handle and X:\ and O:\ paths, as AGENT_RULES.md:12
     does.
 33. **P3.** `GY__TABS` is 8 (guicy.h:391). Say whether containers lift the cap, since the » menu
     is tested with exactly 8.
