@@ -306,3 +306,33 @@ Found and fixed while making the windowed tests honest:
 - **No more made-up end pointers.** gcc found `s + 0x7FFFFFFF`, which is undefined behaviour in C.
   Text functions now take NULL for "to the end".
 - **gcc gets its own no-builtin attribute** (`optimize("no-tree-loop-distribute-patterns")`).
+
+## G0: the one-day GPU spike (PLAN-v2, 2026-11-23)
+
+`bench/gyspike.c` (not part of guicy.h). D3D11 on the RTX 4090: a FLIP_DISCARD swap chain on a
+child window, and per frame GUICy's tile hash pass, one Map of the frame's instances (798 here),
+one DrawInstanced and Present(1, 0). It runs on a desktop of its own and is timed with
+QueryThreadCycleTime (this thread's CPU cycles) and D3D11 timestamp queries; 9 runs of 200 frames,
+medians. The CPU path is timed the same way on the same scene (gy_end only; the UI pass is the
+same on both paths).
+
+| Running case | CPU path, CPU ms | GPU path, CPU ms (hash + Map + Draw + Present) | GPU time on the GPU | Under "every case, ties lose" |
+|---|---|---|---|---|
+| typing one character | **0.013** | 0.124 | 2.83 | CPU |
+| hover on and off a button | **0.080** | 0.124 | 2.83 | CPU |
+| full redraw | 0.385 | **0.124** | 2.83 | GPU on CPU time alone, CPU once the GPU's own time counts |
+
+- **Spread:** the GPU path's CPU cost was 0.103 to 0.128 ms across the 9 runs; the hash pass alone
+  is 0.013 ms.
+- **Present:** all 1,800 presents came back occluded (the test desktop is never shown), so a shown
+  window's present cost isn't in these numbers; on a shown window it can only be higher.
+- **The 2.83 ms of GPU time** is far more than 798 quads should take on this card. Most likely the
+  GPU sits in its idle power state between such small frames. It's reported as measured, not
+  explained away.
+
+**Result:** the GPU path's fixed CPU cost per frame, before any GPU time, is about 10 times the CPU
+path's typing frame and 1.5 times its hover frame. Under the user's rule (every running case must
+win; a tie loses) **the CPU renderer stays the default**. G1 becomes opt-in work after the ports,
+as PLAN-v2 planned for this outcome, and the visible race (check A) isn't needed. The GPU stays
+worth building for apps that redraw everything every frame (animation, big canvases), where the
+full-redraw row is the one that counts.
