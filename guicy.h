@@ -68,11 +68,21 @@ typedef struct gy_theme {
     gy_color divider_hot;
     gy_color tip;         /* tooltip and popup background */
     gy_color shadow;      /* drop shadows (with alpha) */
-    int pad;              /* space inside the frame or panel edge, px */
-    int gap;              /* space between widgets, px */
-    int row_h;            /* the height of one row of widgets, px */
-    int radius;           /* corner radius of buttons and fields, px */
-    int font_px;          /* the default font's height, px */
+    /* sizes, in em of font_px (so the whole UI scales with the font); GUICy turns them into whole
+       pixels once per scale or font change: floor(em x font_px x scale + 0.5) */
+    float pad;            /* space inside the frame or panel edge */
+    float gap;            /* space between widgets */
+    float row_h;          /* the height of one row of widgets */
+    float radius;         /* corner radius of buttons and fields */
+    float check;          /* check box and icon size */
+    float scroll;         /* scroll bar track width */
+    float split;          /* splitter grip width */
+    float title;          /* tile title bar height */
+    float tile_w, tile_h; /* the smallest a tile may be */
+    float track, knob;    /* slider track height and knob size */
+    float button_w;       /* the -/+ buttons of a number box */
+    float inset;          /* text inset inside fields and tips */
+    int font_px;          /* the default font's height, in DIPs (1/96 inch at 100 %) */
 } gy_theme;
 enum { GY_COL_BG, GY_COL_PANEL, GY_COL_CARD, GY_COL_BORDER, GY_COL_TEXT, GY_COL_TEXT_DIM, GY_COL_TEXT_OFF,
        GY_COL_HEADING, GY_COL_BUTTON, GY_COL_BUTTON_HOT, GY_COL_BUTTON_DOWN, GY_COL_ACCENT, GY_COL_ACCENT_HOT,
@@ -438,6 +448,13 @@ typedef struct gy__os_t {
 } gy__os_t;
 static gy__os_t gy__os = { GetGlyphOutlineW, GetTextMetricsW, GetTickCount };
 
+/* the theme's sizes in whole device pixels at the current scale */
+typedef struct gy__sizes {
+    int pad, gap, row_h, radius, check, scroll, split, title, tile_w, tile_h, track, knob, button_w, inset;
+    int line;                                  /* a 1-DIP line: max(1, floor(scale + 0.5)) */
+    int font_px;                               /* the theme font at this scale */
+} gy__sizes;
+
 /* --- the context: one, implicit ---------------------------------------------------------------- */
 typedef struct gy__ctx {
     int ready;
@@ -448,6 +465,8 @@ typedef struct gy__ctx {
     uint32_t *off_px;                          /* the off-screen frame's own allocation */
     size_t off_cap;                            /* its size in pixels */
     gy_theme theme;
+    gy__sizes rs;                              /* the theme's sizes, resolved (GY__S) */
+    float scale;                               /* device pixels per DIP: monitor x zoom x font ratio */
     char error[512];
     char banner[256];
 
@@ -553,6 +572,7 @@ typedef struct gy__ctx {
 
 static gy__ctx gy__c;
 #define GY__T (gy__c.theme)
+#define GY__S (gy__c.rs)
 #define GY__L (gy__c.lay[gy__c.nlay - 1])
 
 static const gy_theme gy__theme_dark = {
@@ -566,9 +586,30 @@ static const gy_theme gy__theme_dark = {
     GY_RGB(24,25,28), GY_RGB(32,33,37), GY_RGB(0,95,110), GY_RGB(90,190,110), GY_RGB(230,190,90), GY_RGB(120,120,220),
     /* divider     divider_hot   tip           shadow (black, 40 % alpha, premultiplied) */
     GY_RGB(52,54,59), GY_RGB(0,150,150), GY_RGB(58,60,66), 0x66000000u,
-    /* pad gap row_h radius font_px */
-    8, 6, 28, 4, 15,
+    /* sizes in em of the 15 px font: pad 8, gap 6, row 28, radius 4, check 16, scroll 10, split 6,
+       title 24, tile 160 x 110, track 6, knob 12, number buttons 22, inset 6 (all at 15 px) */
+    8.0f / 15, 6.0f / 15, 28.0f / 15, 4.0f / 15, 16.0f / 15, 10.0f / 15, 6.0f / 15,
+    24.0f / 15, 160.0f / 15, 110.0f / 15, 6.0f / 15, 12.0f / 15, 22.0f / 15, 6.0f / 15,
+    15,
 };
+
+static int gy__px(float em) {                  /* an em size to whole device pixels at the current scale */
+    float v = em * (float)gy__c.theme.font_px * gy__c.scale + 0.5f;
+    return (int)v - (v < (float)(int)v);       /* floor, without the C library */
+}
+
+static void gy__resolve(void) {
+    const gy_theme *t = &gy__c.theme;
+    gy__sizes *z = &gy__c.rs;
+    float l = gy__c.scale + 0.5f;
+    if (gy__c.scale <= 0) gy__c.scale = 1;
+    z->pad = gy__px(t->pad); z->gap = gy__px(t->gap); z->row_h = gy__px(t->row_h); z->radius = gy__px(t->radius);
+    z->check = gy__px(t->check); z->scroll = gy__px(t->scroll); z->split = gy__px(t->split); z->title = gy__px(t->title);
+    z->tile_w = gy__px(t->tile_w); z->tile_h = gy__px(t->tile_h); z->track = gy__px(t->track); z->knob = gy__px(t->knob);
+    z->button_w = gy__px(t->button_w); z->inset = gy__px(t->inset);
+    z->line = (int)l < 1 ? 1 : (int)l;
+    z->font_px = gy__px(1.0f);
+}
 
 static void gy__set_error(const char *what, const char *detail) {
     int n = 0, i;
@@ -808,6 +849,8 @@ static int gy__init(void) {
     gy__c.troot = gy__c.tfocus = gy__c.tzoom = gy__c.tdrag = -1;
     gy__tile_keys_default();
     gy__c.ready = 1;
+    gy__c.scale = 1;
+    gy__resolve();
     if (gy__font_make("Segoe UI", gy__c.theme.font_px, 0) < 0) return 0;
     return 1;
 }
@@ -839,7 +882,7 @@ int gy_width(void) { return gy__c.w; }
 int gy_height(void) { return gy__c.h; }
 const uint32_t *gy_pixels(void) { return gy__c.px; }
 const gy_theme *gy_theme_get(void) { gy__init(); return &gy__c.theme; }
-void gy_theme_set(const gy_theme *t) { if (gy__init()) { gy__c.theme = *t; gy__c.want_full = 1; } }
+void gy_theme_set(const gy_theme *t) { if (gy__init()) { gy__c.theme = *t; gy__resolve(); gy__c.want_full = 1; } }
 const char *gy_last_error(void) { return gy__c.error; }
 void gy_error(const char *text) { gy__strcpy(gy__c.banner, text ? text : "", sizeof gy__c.banner); }
 
@@ -1289,7 +1332,7 @@ void gy_pop_col(void) {
 }
 
 static void gy__row_layout(gy__lay *l) {
-    int i, n = l->ncols, avail = l->area.w - GY__T.gap * (n - 1), fixed = 0, grow = 0;
+    int i, n = l->ncols, avail = l->area.w - GY__S.gap * (n - 1), fixed = 0, grow = 0;
     float x;
     int px[16];
     for (i = 0; i < n; i++) {
@@ -1303,16 +1346,16 @@ static void gy__row_layout(gy__lay *l) {
     for (i = 0; i < n; i++) {
         float w = px[i] >= 0 ? (float)px[i] : (float)gy__maxi(0, avail - fixed) / (float)grow;
         l->col_x[i] = (int)x;
-        x += w + (float)GY__T.gap;
+        x += w + (float)GY__S.gap;
     }
     /* the end of the last column; with a growing column it is exactly the area's right edge */
-    l->col_x[n] = grow ? l->area.x + l->area.w + GY__T.gap : (int)x;
+    l->col_x[n] = grow ? l->area.x + l->area.w + GY__S.gap : (int)x;
 }
 
-static int gy__rowh(const gy__lay *l) { return l->row_h > 0 ? l->row_h : GY__T.row_h; }
+static int gy__rowh(const gy__lay *l) { return l->row_h > 0 ? l->row_h : GY__S.row_h; }
 
 static void gy__newline(gy__lay *l) {
-    l->cur_y += gy__rowh(l) + l->row_extra + GY__T.gap;
+    l->cur_y += gy__rowh(l) + l->row_extra + GY__S.gap;
     l->row_extra = 0;
     l->col = 0;
 }
@@ -1332,7 +1375,7 @@ void gy_row_h(int h) { GY__L.row_h = h; }
 
 void gy_grid(int cell_w) {
     float w[16];
-    int n = gy__clampi((GY__L.area.w + GY__T.gap) / gy__maxi(1, cell_w + GY__T.gap), 1, 16), i;
+    int n = gy__clampi((GY__L.area.w + GY__S.gap) / gy__maxi(1, cell_w + GY__S.gap), 1, 16), i;
     for (i = 0; i < n; i++) w[i] = -1;
     gy_row(n, w);
 }
@@ -1342,7 +1385,7 @@ static gy_rect gy__next(void) {
     gy_rect r;
     if (l->col >= l->ncols) gy__newline(l);
     r.x = l->col_x[l->col];
-    r.w = l->col_x[l->col + 1] - GY__T.gap - r.x;
+    r.w = l->col_x[l->col + 1] - GY__S.gap - r.x;
     r.y = l->cur_y; r.h = gy__rowh(l);
     l->col++;
     gy__c.last = r;
@@ -1355,7 +1398,7 @@ gy_rect gy_last_rect(void) { return gy__c.last; }
 gy_rect gy_avail(void) {
     gy__lay *l = &GY__L;
     gy_rect r;
-    int y = l->col ? l->cur_y + gy__rowh(l) + l->row_extra + GY__T.gap : l->cur_y;
+    int y = l->col ? l->cur_y + gy__rowh(l) + l->row_extra + GY__S.gap : l->cur_y;
     r.x = l->area.x; r.y = y; r.w = l->area.w; r.h = gy__maxi(0, l->area.y + l->area.h - y);
     return r;
 }
@@ -1366,8 +1409,8 @@ static gy_rect gy__take_rows(int h) {
     gy_rect r;
     if (l->col) gy__newline(l);
     r.x = l->area.x; r.y = l->cur_y; r.w = l->area.w;
-    r.h = h > 0 ? h : gy__maxi(GY__T.row_h, l->area.y + l->area.h - l->cur_y);
-    l->cur_y += r.h + GY__T.gap;
+    r.h = h > 0 ? h : gy__maxi(GY__S.row_h, l->area.y + l->area.h - l->cur_y);
+    l->cur_y += r.h + GY__S.gap;
     gy__c.last = r;
     return r;
 }
@@ -1384,7 +1427,7 @@ static gy__lay *gy__lay_push(int kind, gy_rect area, int clip) {
 }
 
 /* the bottom of what was laid out in l */
-static int gy__lay_bottom(const gy__lay *l) { return l->col ? l->cur_y + gy__rowh(l) + l->row_extra : l->cur_y - GY__T.gap; }
+static int gy__lay_bottom(const gy__lay *l) { return l->col ? l->cur_y + gy__rowh(l) + l->row_extra : l->cur_y - GY__S.gap; }
 
 static int gy__inside(gy_rect r, int x, int y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; }
 
@@ -1467,7 +1510,7 @@ static int gy__button_impl(const char *label, int accent, int key) {
     if (key && !gy__c.disabled && !gy__c.focus && gy__take_key(key, 0)) clicked = 1;
     if (accent) bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.accent : hot ? GY__T.accent_hot : GY__T.accent;
     else bg = gy__c.disabled ? GY__T.button : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : GY__T.button;
-    gy_canvas_box(r, bg, hot ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
+    gy_canvas_box(r, bg, hot ? GY__T.accent : GY__T.border, (float)GY__S.radius, 1);
     gy__draw_text_n(r.x + (r.w - gy__text_w(label, end)) / 2, gy__text_y(r), label, end,
                     gy__c.disabled ? GY__T.text_off : accent ? GY__T.accent_text : GY__T.text);
     return clicked;
@@ -1487,7 +1530,7 @@ int gy_check(const char *label, int *on) {
         gy_canvas_box(box, gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent, 0, 3, 0);
         gy__draw_icon(GY__I_CHECK, box.x, box.y, size, gy__c.disabled ? GY__T.text_off : GY__T.accent_text);
     } else gy_canvas_box(box, hot ? GY__T.field_hot : GY__T.field, hot ? GY__T.accent : GY__T.border, 3, 1);
-    gy__draw_text_n(r.x + size + GY__T.gap, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    gy__draw_text_n(r.x + size + GY__S.gap, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
     return clicked;
 }
 
@@ -1496,8 +1539,8 @@ int gy_select(const char *label, int on) {
     const char *end = gy__label_end(label);
     int hot, held, clicked = gy__button_logic(gy__id(label), r, &hot, &held);
     gy_color bg = on ? (gy__c.disabled ? GY__T.button : hot ? GY__T.accent_hot : GY__T.accent) : held && hot ? GY__T.button_down : hot ? GY__T.button_hot : 0;
-    if (bg) gy_canvas_rect(r, bg, (float)GY__T.radius);
-    gy__draw_text_n(r.x + GY__T.gap, gy__text_y(r), label, end,
+    if (bg) gy_canvas_rect(r, bg, (float)GY__S.radius);
+    gy__draw_text_n(r.x + GY__S.gap, gy__text_y(r), label, end,
                     gy__c.disabled ? GY__T.text_off : on ? GY__T.accent_text : GY__T.text);
     return clicked;
 }
@@ -1588,7 +1631,7 @@ static int gy__number_core(const char *label, float *v, float step, float lo, fl
     int hot, held, hl, hr2, dl, dr, lw = gy__text_w(label, end), changed = 0;
     float old = *v;
     char s[64];
-    if (lw) lw += GY__T.gap;
+    if (lw) lw += GY__S.gap;
     gy__draw_text_n(r.x, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
     r.x += lw; r.w -= lw;
     bl = r; bl.w = 22; br = r; br.x = r.x + r.w - 22; br.w = 22;
@@ -1616,7 +1659,7 @@ static int gy__number_core(const char *label, float *v, float step, float lo, fl
         if ((hot || hl || hr2) && gy__c.wheel != 0 && !gy__c.disabled) { *v += step * gy__c.wheel; gy__c.wheel = 0; }
         if (is_int) *v = (float)(int)(*v + (*v >= 0 ? 0.5f : -0.5f));
         *v = gy__clampf(*v, lo, hi);
-        gy_canvas_box(r, hot || held ? GY__T.field_hot : GY__T.field, hot || hl || hr2 ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
+        gy_canvas_box(r, hot || held ? GY__T.field_hot : GY__T.field, hot || hl || hr2 ? GY__T.accent : GY__T.border, (float)GY__S.radius, 1);
         gy__draw_icon(GY__I_MINUS, bl.x + 3, bl.y + (bl.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : hl ? GY__T.accent_hot : GY__T.text_dim);
         gy__draw_icon(GY__I_PLUS, br.x + 3, br.y + (br.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : hr2 ? GY__T.accent_hot : GY__T.text_dim);
         if (is_int) gy__fmt(s, sizeof s, "%d", (int)*v); else gy__fmt(s, sizeof s, "%.2f", (double)*v);
@@ -1776,7 +1819,7 @@ static int gy__edit_core(uint32_t id, gy_rect r, char *buf, int cap, int numeric
         if (cx - st->f0 > tr.w) st->f0 = (float)(cx - tr.w);
         if (cx - st->f0 < 0) st->f0 = (float)cx;
         x0 = tr.x - (int)st->f0;
-        gy_canvas_box(r, focused || hot ? GY__T.field_hot : GY__T.field, focused ? GY__T.accent : hot ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
+        gy_canvas_box(r, focused || hot ? GY__T.field_hot : GY__T.field, focused ? GY__T.accent : hot ? GY__T.accent : GY__T.border, (float)GY__S.radius, 1);
         clip = gy__clip_push(tr);
         {
             int saved = GY__L.clip;
@@ -1800,7 +1843,7 @@ int gy_edit(const char *label, char *buf, int cap) {
     int lw = gy__text_w(label, end);
     if (lw) {
         gy__draw_text_n(r.x, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
-        r.x += lw + GY__T.gap; r.w -= lw + GY__T.gap;
+        r.x += lw + GY__S.gap; r.w -= lw + GY__S.gap;
     }
     return gy__edit_core(gy__id(label), r, buf, cap, 0);
 }
@@ -1855,19 +1898,19 @@ int gy_combo(const char *label, int *sel, const char *items) {
     for (it = items; *it; it += gy__strlen(it) + 1) n++;
     if (lw) {
         gy__draw_text_n(r.x, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
-        r.x += lw + GY__T.gap; r.w -= lw + GY__T.gap;
+        r.x += lw + GY__S.gap; r.w -= lw + GY__S.gap;
     }
     if (gy__button_logic(id, r, &hot, &held)) {
         if (gy__c.popup_id == id) gy__c.popup_id = 0;
         else { gy__c.popup_id = id; gy__c.popup_kind = 1; }
     }
-    gy_canvas_box(r, hot ? GY__T.button_hot : GY__T.button, hot || gy__c.popup_id == id ? GY__T.accent : GY__T.border, (float)GY__T.radius, 1);
+    gy_canvas_box(r, hot ? GY__T.button_hot : GY__T.button, hot || gy__c.popup_id == id ? GY__T.accent : GY__T.border, (float)GY__S.radius, 1);
     for (it = items, i = 0; *it && i < *sel; it += gy__strlen(it) + 1) i++;
-    if (*it) gy__draw_text_n(r.x + GY__T.gap, gy__text_y(r), it, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
+    if (*it) gy__draw_text_n(r.x + GY__S.gap, gy__text_y(r), it, NULL, gy__c.disabled ? GY__T.text_off : GY__T.text);
     gy__draw_icon(GY__I_DOWN, r.x + r.w - 20, r.y + (r.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
     if (gy__c.popup_id == id) {                /* the open list, on the popup layer */
         int saved_row = GY__L.row_h;
-        list.x = r.x; list.y = r.y + r.h + 2; list.w = r.w; list.h = n * rowh + (n - 1) * GY__T.gap + 8;
+        list.x = r.x; list.y = r.y + r.h + 2; list.w = r.w; list.h = n * rowh + (n - 1) * GY__S.gap + 8;
         if (list.y + list.h > gy__c.h) list.y = gy__maxi(0, r.y - list.h - 2);
         gy__popup_lay(list);
         GY__L.row_h = rowh;
@@ -1894,8 +1937,8 @@ int gy_context_begin(void) {
     }
     if (gy__c.popup_id != owner) return 0;
     gy__ctx_owner = owner;
-    r.x = gy__clampi(gy__c.popup_x, 0, gy__maxi(0, gy__c.w - 200)); r.y = gy__clampi(gy__c.popup_y, 0, gy__maxi(0, gy__c.h - n * GY__T.row_h));
-    r.w = 200; r.h = gy__state(owner)->i0 ? gy__state(owner)->i0 : n * (GY__T.row_h + GY__T.gap);
+    r.x = gy__clampi(gy__c.popup_x, 0, gy__maxi(0, gy__c.w - 200)); r.y = gy__clampi(gy__c.popup_y, 0, gy__maxi(0, gy__c.h - n * GY__S.row_h));
+    r.w = 200; r.h = gy__state(owner)->i0 ? gy__state(owner)->i0 : n * (GY__S.row_h + GY__S.gap);
     gy__popup_lay(r);
     return 1;
 }
@@ -1985,7 +2028,7 @@ void gy_scroll_begin(const char *idl, int h) {
     gy__lay *l;
     int clip = gy__clip_push(r);
     in = r; in.x += 4; in.w -= 16; in.y += 4; in.h -= 8;
-    gy_canvas_box(r, GY__T.panel, GY__T.border, (float)GY__T.radius, 1);
+    gy_canvas_box(r, GY__T.panel, GY__T.border, (float)GY__S.radius, 1);
     l = gy__lay_push(GY__L_SCROLL, in, clip);
     l->id = id;
     l->top = in.y;
@@ -2005,7 +2048,7 @@ void gy_scroll_rows(int n, int *first, int *last) {
     if (gy__c.nlay < 2 || l->kind != GY__L_SCROLL) return;   /* outside a scroll region: every row */
     if (l->col) gy__newline(l);
     view = gy__c.clips[l->clip];
-    pitch = gy__rowh(l) + GY__T.gap;
+    pitch = gy__rowh(l) + GY__S.gap;
     f = gy__clampi((view.y - l->cur_y) / pitch, 0, n - 1);
     e = gy__clampi((view.y + view.h - l->cur_y) / pitch + 1, f, n - 1);
     l->cur_y += f * pitch;                     /* the rows above the view take their space */
@@ -2028,7 +2071,7 @@ void gy_scroll_end(void) {
     view = gy__c.clips[l->clip];
     gy__c.nlay--;
     if (gy__mouse_in(view) && gy__c.wheel != 0) {   /* the innermost region under the mouse takes the wheel */
-        st->f0 -= gy__c.wheel * (float)(GY__T.row_h * 3);
+        st->f0 -= gy__c.wheel * (float)(GY__S.row_h * 3);
         gy__c.wheel = 0;
         st->f0 = gy__clampf(st->f0, 0, gy__maxf(0, st->f1 - st->f2));
         gy__c.passes = gy__maxi(gy__c.passes, 1);
@@ -2054,7 +2097,7 @@ int gy_tree(const char *label) {
     int hot, held;
     gy__lay *l;
     if (gy__button_logic(id, r, &hot, &held)) st->i0 = !st->i0;
-    if (hot) gy_canvas_rect(r, GY__T.button_hot, (float)GY__T.radius);
+    if (hot) gy_canvas_rect(r, GY__T.button_hot, (float)GY__S.radius);
     gy__draw_icon(st->i0 ? GY__I_DOWN : GY__I_RIGHT, r.x, r.y + (r.h - 16) / 2, 16, gy__c.disabled ? GY__T.text_off : GY__T.text_dim);
     gy__draw_text_n(r.x + 20, gy__text_y(r), label, end, gy__c.disabled ? GY__T.text_off : GY__T.text);
     if (!st->i0) return 0;
@@ -2078,7 +2121,7 @@ void gy_tree_end(void) {
     gy_id_pop();
     bottom = gy__lay_bottom(l);
     gy__c.nlay--;
-    GY__L.cur_y = bottom + GY__T.gap; GY__L.col = 0; GY__L.row_extra = 0;
+    GY__L.cur_y = bottom + GY__S.gap; GY__L.col = 0; GY__L.row_extra = 0;
 }
 
 void gy_panel_begin(void) {
@@ -2087,9 +2130,9 @@ void gy_panel_begin(void) {
     if (p->col) gy__newline(p);
     y = p->cur_y;
     gy__c.no_cull = 1;                         /* the card grows at the end, so it must be kept even if this 1 px row is hidden */
-    gy_canvas_box((gy_rect){ p->area.x, y, p->area.w, 1 }, GY__T.card, GY__T.border, (float)GY__T.radius, 1);
+    gy_canvas_box((gy_rect){ p->area.x, y, p->area.w, 1 }, GY__T.card, GY__T.border, (float)GY__S.radius, 1);
     gy__c.no_cull = 0;
-    l = gy__lay_push(GY__L_PANEL, (gy_rect){ p->area.x + GY__T.pad, y + GY__T.pad, p->area.w - 2 * GY__T.pad, p->area.y + p->area.h - y - 2 * GY__T.pad }, p->clip);
+    l = gy__lay_push(GY__L_PANEL, (gy_rect){ p->area.x + GY__S.pad, y + GY__S.pad, p->area.w - 2 * GY__S.pad, p->area.y + p->area.h - y - 2 * GY__S.pad }, p->clip);
     l->bg_inst = gy__c.ninst - 1;              /* the card is patched to the right height at the end */
     l->top = y;
 }
@@ -2098,10 +2141,10 @@ void gy_panel_end(void) {
     gy__lay *l = &GY__L;
     int bottom;
     if (gy__c.nlay < 2 || l->kind != GY__L_PANEL) return;
-    bottom = gy__lay_bottom(l) + GY__T.pad;
+    bottom = gy__lay_bottom(l) + GY__S.pad;
     if (l->bg_inst >= 0 && l->bg_inst < gy__c.ninst) gy__c.inst[l->bg_inst].y1 = (int16_t)bottom;
     gy__c.nlay--;
-    GY__L.cur_y = bottom + GY__T.gap; GY__L.col = 0; GY__L.row_extra = 0;
+    GY__L.cur_y = bottom + GY__S.gap; GY__L.col = 0; GY__L.row_extra = 0;
 }
 
 void gy_split(const char *idl, int dir, float *pos, float def) {
@@ -2145,9 +2188,9 @@ void gy_split_end(void) {
    Tiling: a binary split tree of tiles that always fills the area; stacks of tabs at the leaves
    ================================================================================================ */
 
-#define GY__TITLE_H 24
-#define GY__TILE_MIN_W 160
-#define GY__TILE_MIN_H 110
+#define GY__TITLE_H (gy__c.rs.title)
+#define GY__TILE_MIN_W (gy__c.rs.tile_w)
+#define GY__TILE_MIN_H (gy__c.rs.tile_h)
 
 static void gy__tile_keys_default(void) {
     int A = GY_MOD_ALT << 16, AS = (GY_MOD_ALT | GY_MOD_SHIFT) << 16;
@@ -2209,7 +2252,7 @@ static void gy__tlayout(int n, gy_rect r) {
     }
 }
 
-static gy_rect gy__tile_area(void) { return (gy_rect){ GY__T.pad / 2, GY__T.pad / 2, gy__c.w - GY__T.pad, gy__c.h - GY__T.pad }; }
+static gy_rect gy__tile_area(void) { return (gy_rect){ GY__S.pad / 2, GY__S.pad / 2, gy__c.w - GY__S.pad, gy__c.h - GY__S.pad }; }
 
 /* how far the worst tile is under the minimum size, in px (0: every tile fits), after a fresh layout.
    A key, a flip or a divider move is refused when it would make this bigger (a tile never goes
@@ -2454,19 +2497,19 @@ static void gy__tile_chrome(void) {
         int x;
         if (!t->used || !t->leaf || (gy__c.tzoom >= 0 && n != gy__c.tzoom)) continue;
         r = gy__c.tzoom == n ? gy__tile_area() : t->r;
-        gy_canvas_box(r, GY__T.panel, GY__T.border, (float)GY__T.radius, 1);
+        gy_canvas_box(r, GY__T.panel, GY__T.border, (float)GY__S.radius, 1);
         bar = r; bar.h = GY__TITLE_H;
-        gy_canvas_box((gy_rect){ bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 1 }, GY__T.card, 0, (float)GY__T.radius, 0);
+        gy_canvas_box((gy_rect){ bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 1 }, GY__T.card, 0, (float)GY__S.radius, 0);
         if (n == gy__c.tfocus) {               /* the focus outline on its own: four thin sides and four
                                                   clipped corners, so a focus move redraws only the edge tiles */
-            int cs = GY__T.radius + 2, c4, saved = GY__L.clip;
+            int cs = GY__S.radius + 2, c4, saved = GY__L.clip;
             gy_canvas_rect((gy_rect){ r.x + cs, r.y, r.w - 2 * cs, 1 }, GY__T.accent, 0);
             gy_canvas_rect((gy_rect){ r.x + cs, r.y + r.h - 1, r.w - 2 * cs, 1 }, GY__T.accent, 0);
             gy_canvas_rect((gy_rect){ r.x, r.y + cs, 1, r.h - 2 * cs }, GY__T.accent, 0);
             gy_canvas_rect((gy_rect){ r.x + r.w - 1, r.y + cs, 1, r.h - 2 * cs }, GY__T.accent, 0);
             for (c4 = 0; c4 < 4; c4++) {
                 GY__L.clip = gy__clip_push((gy_rect){ c4 & 1 ? r.x + r.w - cs : r.x, c4 & 2 ? r.y + r.h - cs : r.y, cs, cs });
-                gy_canvas_box(r, 0, GY__T.accent, (float)GY__T.radius, 1);
+                gy_canvas_box(r, 0, GY__T.accent, (float)GY__S.radius, 1);
                 GY__L.clip = saved;
             }
         }
@@ -2492,7 +2535,7 @@ static void gy__tile_chrome(void) {
             if (!t->used || !t->leaf || n == from || !gy__inside(t->r, gy__c.mx, gy__c.my)) continue;
             mid.x = t->r.x + t->r.w * 3 / 10; mid.y = t->r.y + t->r.h * 3 / 10; mid.w = t->r.w * 4 / 10; mid.h = t->r.h * 4 / 10;
             gy__c.layer = 2;
-            gy_canvas_box(gy__inside(mid, gy__c.mx, gy__c.my) ? mid : t->r, 0x40009696u, GY__T.accent, (float)GY__T.radius, 2);
+            gy_canvas_box(gy__inside(mid, gy__c.mx, gy__c.my) ? mid : t->r, 0x40009696u, GY__T.accent, (float)GY__S.radius, 2);
             gy__c.layer = 0;
             if (gy__c.released[0]) {
                 if (gy__inside(mid, gy__c.mx, gy__c.my) && t->ntabs < GY__TABS) {
@@ -2527,7 +2570,7 @@ int gy_tile(const char *name) {
     for (k = 0; k < gy__c.tn[leaf].ntabs; k++) if (gy__c.tn[leaf].tabs[k] == t && k != gy__c.tn[leaf].active) return 0;
     r = gy__c.tzoom == leaf ? gy__tile_area() : gy__c.tn[leaf].r;
     r.y += GY__TITLE_H; r.h -= GY__TITLE_H;
-    r.x += GY__T.pad; r.w -= 2 * GY__T.pad; r.y += GY__T.pad / 2; r.h -= GY__T.pad;
+    r.x += GY__S.pad; r.w -= 2 * GY__S.pad; r.y += GY__S.pad / 2; r.h -= GY__S.pad;
     l = gy__lay_push(GY__L_TILE, r, 0);
     l->clip = gy__clip_push((gy_rect){ r.x - 2, r.y - 2, r.w + 4, r.h + 4 });
     l->id = gy__c.tl[t].id;
@@ -2727,7 +2770,7 @@ void gy_begin(void) {
     gy__c.nclips = 1; gy__c.layer = 0;
     gy__c.clips[0].x = 0; gy__c.clips[0].y = 0; gy__c.clips[0].w = gy__c.w; gy__c.clips[0].h = gy__c.h;
     gy__c.nlay = 0;
-    l = gy__lay_push(GY__L_ROOT, (gy_rect){ GY__T.pad, GY__T.pad, gy__c.w - 2 * GY__T.pad, gy__c.h - 2 * GY__T.pad }, 0);
+    l = gy__lay_push(GY__L_ROOT, (gy_rect){ GY__S.pad, GY__S.pad, gy__c.w - 2 * GY__S.pad, gy__c.h - 2 * GY__S.pad }, 0);
     (void)l;
     gy__c.id_depth = 0; gy__c.disabled = 0; gy__c.font = 0; gy__c.ncolstack = 0;
     gy__c.nblock_cur = 0; gy__c.popup_used = 0; gy__c.tip_shown = 0; gy__c.focus_claimed = 0;
@@ -3135,7 +3178,7 @@ void gy_end(void) {
         int h = gy_line_height() + 12;
         gy__c.layer = 2;
         gy_canvas_box((gy_rect){ 0, gy__c.h - h, gy__c.w, h }, GY__T.card, GY__T.warn, 0, 1);
-        gy_canvas_text(GY__T.pad, gy__c.h - h + 6, gy__c.banner, GY__T.warn);
+        gy_canvas_text(GY__S.pad, gy__c.h - h + 6, gy__c.banner, GY__T.warn);
         gy__c.layer = 0;
     }
     /* a click outside an open popup closes it; a click that no edit box took takes the keys away */
