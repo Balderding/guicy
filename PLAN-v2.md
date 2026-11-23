@@ -372,7 +372,8 @@ machine; no path is chosen by guess.
 - **Small changes** (hover, caret, typing, one widget): CPU dirty tiles, as now (G0: 0.013 ms).
 - **Big changes** (resize, scroll, zoom, theme switch, animation, more than half the tiles dirty):
   the GPU draws the whole frame from the same instance list (G0: 0.124 ms CPU side vs 0.385 ms).
-- **Heavy single jobs:** large image scaling/smoothing and the zoom stretch preview (O1) on the GPU.
+- **Heavy single jobs:** large image scaling/smoothing on the GPU. (The zoom stretch preview, O1, is
+  NOT in G1 until the user decides on it.)
 - **No GPU, RDP, WARP/Basic Render, or any failure:** everything on the CPU, as today.
 
 **Two ways to share one window (the race picks, per machine):**
@@ -386,6 +387,19 @@ machine; no path is chosen by guess.
   idle); a class switches path only after the other wins by more than the spread for 8 frames in a
   row (no flapping). `GUICY_RENDER=cpu|gpu|hybrid` and `gy_desc.render` override;
   `gy_renderer_name()` and the log say which path each class uses and why.
+- **The pick is said at start:** one plain log line, e.g. "GPU draws big frames, the CPU small ones
+  (mode P: the GPU was faster on resize and scroll)", and again whenever a class switches.
+- **Idle in both modes:** 0 frames and 0 presents over 60 s, in mode P and in mode C.
+- **Device loss in both modes** falls back to the CPU in mode C in the same frame, without a black
+  frame (the parent's last BitBlt shows until the CPU frame lands).
+- **Same pixels on both paths:** a class switching CPU<->GPU must not change the picture (no shimmer
+  on resize or scroll). Solid fills, borders and text with full coverage are byte-equal; only pixels
+  in the pixel-class mask below (anti-aliased edges, alpha, glyph edges, filtered images) may differ,
+  by at most 1 level per channel. Tested per frame class: the same frame drawn by both paths, diffed.
+- **Size: outside the core.** G1 is an optional part of guicy.h behind `#define GUICY_GPU` (off by
+  default), not counted against the 125 kB core cap; the core through A3 is 122.3 kB. A build without
+  `GUICY_GPU` has no D3D code at all and stays CPU only. If the user wants the GPU part counted inside
+  the cap, that is their cap decision before G1 starts.
 
 Deliverable:
 - **Drawing:** D3D11 FL 11.0 loaded at run time; one `DrawInstanced(4, n)` over the same 48-byte
@@ -438,7 +452,7 @@ Proof:
   smaller than the present-call time is not proven and stays on the CPU until visible race A
   confirms it. Mode P vs mode C is decided the same way, on the whole set. First frame and start to
   window are reported, not decided on.
-Budgets: +20 KB (the chooser inside it, about 1 KB; the 125 kB core cap holds); GPU-path frame CPU side 0.5 ms for 5,000 glyphs and 500 rects (reported).
+Budgets: +20 KB in the optional GUICY_GPU part (the chooser inside it, about 1 KB), the core unchanged; GPU-path frame CPU side 0.5 ms for 5,000 glyphs and 500 rects (reported).
 
 ### G2, T1, P1: containers, drop zones and panel docks (default parts). Milestone M5
 
