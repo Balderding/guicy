@@ -195,6 +195,8 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "a1_shapes", t_a1_shapes },
     { "a1_shapes_dirty", t_a1_shapes_dirty },
     { "a1_cut", t_a1_cut },
+    { "a1_scroll_canvas", t_a1_scroll_canvas },
+    { "a1_wheel", t_a1_wheel },
     { "w_ime", t_w_ime },
     { "w_app_msgs", t_w_app_msgs },
     { "x1_no_font", t_x1_no_font },

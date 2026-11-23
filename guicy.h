@@ -1702,7 +1702,11 @@ void gy_row(int n, const float *widths) {
     gy__row_layout(l);
 }
 
-void gy_row_h(int h) { GY__L.row_h = h > 0 ? gy__px((float)h / (float)gy__c.theme.font_px) : 0; }
+void gy_row_h(int h) {                         /* the rows from here on; a row already started ends at its own height */
+    gy__lay *l = &GY__L;
+    if (l->col) gy__newline(l);
+    l->row_h = h > 0 ? gy__px((float)h / (float)gy__c.theme.font_px) : 0;
+}
 
 void gy_grid(int cell_w) {
     float w[16];
@@ -1794,6 +1798,15 @@ static int gy__kfocus(uint32_t id, gy__ir r) {
     gy__box((gy__ir){ r.x - g, r.y - g, r.w + 2 * g, r.h + 2 * g }, 0, GY__T.accent, (float)(GY__S.radius + g), (float)GY__S.line);
     if (gy__c.focus) return 0;                 /* an edit box has the keys */
     return gy__take_key(GY_KEY_ENTER, 0) || gy__take_key(GY_KEY_SPACE, 0);
+}
+/* may a number or slider under the mouse take the wheel? Inside a scroll region that can scroll, only
+   when it has the focus (clicked or Tabbed to): else the wheel scrolls the region past it */
+static int gy__wheel_ok(uint32_t id) {
+    int i;
+    if (id == gy__c.kfocus) return 1;
+    for (i = gy__c.nlay - 1; i > 0; i--)
+        if (gy__c.lay[i].kind == GY__L_SCROLL) { gy__st *st = gy__state(gy__c.lay[i].id); if (st->f1 > st->f2 + 0.5f) return 0; }
+    return 1;
 }
 /* Left / Right on the focused slider or number: -1, 0 or +1 */
 static int gy__kfocus_step(uint32_t id) {
@@ -1938,7 +1951,7 @@ static int gy__slider_core(const char *label, float *v, float lo, float hi, floa
         t = gy__clampf((float)(gy__c.mx - r.x - GY__S.knob / 2) / (float)gy__maxi(1, r.w - GY__S.knob), 0, 1);
         *v = lo + (hi - lo) * t;
     }
-    if (hot && gy__c.wheel != 0 && !gy__c.disabled) { *v += (step > 0 ? step : (hi - lo) / 20) * gy__c.wheel; gy__c.wheel = 0; }
+    if (hot && gy__c.wheel != 0 && !gy__c.disabled && gy__wheel_ok(id)) { *v += (step > 0 ? step : (hi - lo) / 20) * gy__c.wheel; gy__c.wheel = 0; }
     if (step > 0) { float k = (*v - lo) / step; *v = lo + step * (float)(int)(k + (k >= 0 ? 0.5f : -0.5f)); }
     *v = gy__clampf(*v, lo, hi);
     changed = *v != old;
@@ -2026,7 +2039,7 @@ static int gy__number_core(const char *label, float *v, float step, float lo, fl
             if (is_int) gy__fmt(gy__c.undo[15], 64, "%d", (int)*v); else gy__fmt(gy__c.undo[15], 64, "%.3f", (double)*v);
             gy__state(tid)->i0 = gy__strlen(gy__c.undo[15]); gy__state(tid)->i1 = 0;
         }
-        if ((hot || hl || hr2) && gy__c.wheel != 0 && !gy__c.disabled) { *v += step * gy__c.wheel; gy__c.wheel = 0; }
+        if ((hot || hl || hr2) && gy__c.wheel != 0 && !gy__c.disabled && gy__wheel_ok(id)) { *v += step * gy__c.wheel; gy__c.wheel = 0; }
         if (is_int) *v = (float)(int)(*v + (*v >= 0 ? 0.5f : -0.5f));
         *v = gy__clampf(*v, lo, hi);
         gy__box(r, hot || held ? GY__T.field_hot : GY__T.field, hot || hl || hr2 ? GY__T.accent : GY__T.border, (float)GY__S.radius, (float)GY__S.line);

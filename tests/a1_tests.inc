@@ -217,3 +217,96 @@ static int t_w_app_msgs(void) {
     if (ok) LOG("WM_APP, WM_APP+1, WM_APP+2 and WM_USER+1 came back to the app once each, wParam kept; gy_wake woke GUICy only; ");
     return ok;
 }
+
+/* --- gap 6: a canvas drawing at gy_last_rect inside a scrolled region (bbb_kit's size picture):
+   gy_last_rect is in window coordinates, scrolled; the drawing is clipped to the region; a tall row
+   made with gy_row_h stretches neither the row before it nor runs into the rows after it ----------- */
+static gy_rect sc_box;
+static int sc_clip_ok;
+static float sc_after_y;
+static void sc_scene(void) {
+    int i;
+    gy_begin();
+    gy_scroll_begin("list", 200);
+    for (i = 0; i < 2; i++) gy_text("row %d", i);
+    gy_row_h(128); gy_spacer();
+    sc_box = gy_last_rect();
+    gy_canvas_box(sc_box, gy_theme_get()->accent, 0, 0, 0);
+    sc_clip_ok = gy__c.ninst > 0 && gy__c.clips[gy__c.inst[gy__c.ninst - 1].clip].h == gy__c.clips[GY__L.clip].h && GY__L.kind == GY__L_SCROLL;
+    gy_row_h(0);
+    gy_text("after the picture");
+    sc_after_y = gy_last_rect().y;
+    for (i = 0; i < 12; i++) gy_text("after %d", i);
+    gy_scroll_end();
+    gy_end();
+}
+static int t_a1_scroll_canvas(void) {
+    gy_rect before;
+    float row, gap;
+    int ok = 1;
+    gy_shutdown();
+    if (!open_at(400, 300)) return 0;
+    gy_scale_set(1);
+    row = (float)gy__c.rs.row_h; gap = (float)gy__c.rs.gap;
+    gy_input_mouse(100, 100); sc_scene(); sc_scene();
+    before = sc_box;
+    if (sc_after_y < before.y + 128 + gap - 0.5f) { LOG("the row after the 128 row starts at %.0f, inside it (%.0f..%.0f); ", (double)sc_after_y, (double)before.y, (double)(before.y + 128)); ok = 0; }
+    {   /* the 128 row starts one plain row below the row above it, not 128 below */
+        const gy_test_text *t;
+        int n = gy_test_texts(&t), i;
+        for (i = 0; i < n; i++) if (!strcmp(t[i].s, "row 1") && (float)t[i].r.y < before.y - row - gap - 8) { LOG("the row before the 128 row was stretched; "); ok = 0; }
+    }
+    gy_input_wheel(-1); sc_scene(); sc_scene();  /* one notch */
+    {   float moved = before.y - sc_box.y;
+        if (moved <= 0 || sc_box.x != before.x) { LOG("after a notch the cell moved by %.0f; ", (double)moved); ok = 0; }
+        else LOG("one notch scrolled the cell %.0f px up; ", (double)moved);
+    }
+    if (!sc_clip_ok) { LOG("the canvas box is not clipped to the scroll region; "); ok = 0; }
+    if (ok) LOG("gy_last_rect scrolled with the region, the canvas clipped to it, the 128 row in its own place; ");
+    return ok;
+}
+
+/* --- gap 7: the wheel over a number inside a scrolling panel scrolls the panel; the number takes it
+   only with the focus; outside scroll regions the wheel over it changes it, as before ------------ */
+static int wh_n;
+static gy_rect wh_r;
+static void wh_scene(void) {
+    int i;
+    gy_begin();
+    gy_scroll_begin("panel", 200);
+    for (i = 0; i < 6; i++) gy_text("setting %d", i);
+    gy_number_i("How many", &wh_n, 1, 20);
+    wh_r = gy_last_rect();
+    for (i = 0; i < 20; i++) gy_text("more %d", i);
+    gy_scroll_end();
+    gy_end();
+}
+static void wh_plain(void) { gy_begin(); gy_number_i("How many", &wh_n, 1, 20); wh_r = gy_last_rect(); gy_end(); }
+static int t_a1_wheel(void) {
+    int i, ok = 1;
+    gy_shutdown();
+    if (!open_at(400, 300)) return 0;
+    gy_scale_set(1);
+    wh_n = 4;
+    gy_input_mouse(200, 150); wh_scene(); wh_scene();
+    for (i = 0; i < 40; i++) { gy_input_wheel(-1); wh_scene(); }
+    if (wh_n != 4) { LOG("40 notches over the panel changed How many to %d; ", wh_n); ok = 0; }
+    for (i = 0; i < 40; i++) { gy_input_wheel(1); wh_scene(); }   /* and back up past it */
+    if (wh_n != 4) { LOG("40 notches back up changed How many to %d; ", wh_n); ok = 0; }
+    /* one notch down puts it in view; clicked, it has the focus and the wheel is its own */
+    gy_input_wheel(-1); wh_scene(); wh_scene();
+    gy_input_mouse((int)(wh_r.x + wh_r.w / 2), (int)(wh_r.y + wh_r.h / 2)); wh_scene();
+    gy_input_button(0, 1); wh_scene(); gy_input_button(0, 0); wh_scene();
+    gy_input_wheel(1); wh_scene(); wh_scene();
+    if (wh_n != 5) { LOG("with the focus, a notch up gave %d, want 5; ", wh_n); ok = 0; }
+    /* outside a scroll region: hover and wheel, as before */
+    gy_shutdown();
+    if (!open_at(400, 120)) return 0;
+    wh_n = 4;
+    wh_plain();
+    gy_input_mouse((int)(wh_r.x + wh_r.w / 2), (int)(wh_r.y + wh_r.h / 2)); wh_plain();
+    gy_input_wheel(1); wh_plain(); wh_plain();
+    if (wh_n != 5) { LOG("outside a scroll region the wheel over it gave %d, want 5; ", wh_n); ok = 0; }
+    if (ok) LOG("40 notches scrolled the panel past How many (stays 4); focused it takes the wheel (5); outside a region as before; ");
+    return ok;
+}
