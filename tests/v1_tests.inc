@@ -535,3 +535,69 @@ static int t_f1_corner_cache(void) {
     CHECK(with == without, "the corner cache changed pixels");
     return 1;
 }
+
+/* --- old_layouts: layout lines saved today must load to the same geometry at every later step ---
+   tests/golden/layouts-2026-11-22.txt holds, per case, the saved line and the geometry it loads to
+   (every leaf's rect, its tabs, the active one, the focus and the zoom). The first run writes it;
+   later runs compare. It is never re-baselined. */
+static void geom_dump(char *out, int cap) {
+    int n, k, at = 0;
+    out[0] = 0;
+    for (n = 0; n < GY__TNODES; n++) {
+        gy__tnode *t = &gy__c.tn[n];
+        if (!t->used || !t->leaf) continue;
+        at += snprintf(out + at, (size_t)(cap - at), "[%d,%d,%d,%d", t->r.x, t->r.y, t->r.w, t->r.h);
+        for (k = 0; k < t->ntabs && at < cap; k++) at += snprintf(out + at, (size_t)(cap - at), "%s%s", k ? "|" : " ", gy__c.tl[t->tabs[k]].name);
+        if (at < cap) at += snprintf(out + at, (size_t)(cap - at), " a%d%s%s]", t->active, n == gy__c.tfocus ? " F" : "", n == gy__c.tzoom ? " Z" : "");
+    }
+}
+static int geom_of(int many, int w, int h, const char *line, char *out, int cap) {
+    if (!open_at(w, h)) return 0;
+    gy_input_mouse(-100, -100);
+    memset(&T, 0, sizeof T); T.n = 4;
+    if (!many) gy_tile_close("Extra");
+    if (!gy_tiles_load(line)) { gy_shutdown(); return 0; }
+    if (many) { many_n = 32; frames(many_scene, 3); } else frames(t_scene, 3);
+    geom_dump(out, cap);
+    gy_shutdown();
+    return 1;
+}
+static int t_old_layouts(void) {
+    char path[MAX_PATH], line[2048], geom[8192], got[8192];
+    FILE *f;
+    int cases = 0, w, h, many;
+    GetModuleFileNameA(NULL, path, MAX_PATH);  /* the exe is in build/: the file is in ../tests/golden */
+    *strrchr(path, 92) = 0; *strrchr(path, 92) = 0;
+    strcat(path, "/tests/golden/layouts-2026-11-22.txt");
+    f = fopen(path, "r");
+    if (!f) {                                  /* first run: make the lines with today's code and write them down */
+        struct { int many, w, h, keys; } c[5] = { { 0, 720, 460, 0 }, { 0, 720, 460, 1 }, { 0, 720, 460, 2 }, { 0, 330, 240, 0 }, { 1, 720, 460, 0 } };
+        int i;
+        f = fopen(path, "w");
+        if (!f) { LOG("could not write %s; ", path); return 0; }
+        for (i = 0; i < 5; i++) {
+            if (c[i].many) { if (!open_at(c[i].w, c[i].h)) return 0; gy_input_mouse(-100, -100); many_n = 32; frames(many_scene, 3); }
+            else if (!tiles_open(c[i].w, c[i].h)) return 0;
+            if (c[i].keys == 1) { key(t_scene, GY_MOD_ALT, GY_KEY_RIGHT); key(t_scene, GY_MOD_ALT | GY_MOD_SHIFT, GY_KEY_LEFT); key(t_scene, GY_MOD_ALT, 'F'); }
+            if (c[i].keys == 2) { gy_input_mouse(30, 245); t_scene(); gy_input_button(0, 1); t_scene(); gy_input_mouse(90, 113); t_scene(); gy_input_mouse(90, 115); t_scene(); gy_input_button(0, 0); t_scene(); }
+            gy_tiles_save(line, sizeof line);
+            gy_shutdown();
+            if (!geom_of(c[i].many, c[i].w, c[i].h, line, geom, sizeof geom)) return 0;
+            fprintf(f, "%d %d %d %s\n%s\n", c[i].many, c[i].w, c[i].h, line, geom);
+        }
+        fclose(f);
+        LOG("wrote %s (5 cases); ", path);
+        return open_at(64, 64) && (gy_begin(), gy_end(), 1);
+    }
+    while (fscanf(f, "%d %d %d %2047s", &many, &w, &h, line) == 4) {
+        if (!fgets(geom, sizeof geom, f) || !fgets(geom, sizeof geom, f)) break;
+        geom[strcspn(geom, "\r\n")] = 0;
+        cases++;
+        if (!geom_of(many, w, h, line, got, sizeof got)) { fclose(f); LOG("case %d did not load: %s; ", cases, line); return 0; }
+        if (strcmp(got, geom)) { fclose(f); LOG("case %d: %s\n  was %s\n  now %s; ", cases, line, geom, got); return 0; }
+    }
+    fclose(f);
+    LOG("%d saved layouts load to the same geometry; ", cases);
+    CHECK(cases == 5, "only %d cases in the file", cases);
+    return open_at(64, 64) && (gy_begin(), gy_end(), 1);
+}

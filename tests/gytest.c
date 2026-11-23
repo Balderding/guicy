@@ -164,6 +164,7 @@ static const struct { const char *name; test_fn fn; } TESTS[] = {
     { "fix_tile_many", t_fix_tile_many },
     { "f1_cull", t_f1_cull },
     { "f1_corner_cache", t_f1_corner_cache },
+    { "old_layouts", t_old_layouts },
 };
 #define NTESTS ((int)(sizeof TESTS / sizeof TESTS[0]))
 

@@ -231,3 +231,55 @@ CPU: Intel(R) Core(TM) i9-10980XE CPU @ 3.00GHz
   no longer won. All 28 tests still pass with the same bytes on all three kernel sets.
 
 `guicy.o` after step 5: 78,600 / 7,599 / 73,284 (text / data / bss).
+
+## F1: fix what the stress tests found (PLAN-v2, 2026-11-23)
+
+All pixel changes are proven byte-equal by the 33 gytest goldens on all three kernel sets, except
+the tile focus outline (item 6), which was re-baselined once after a side-by-side look (at most
+22 levels on anti-aliased corner pixels). gystress at 1920x1080, AVX2, median:
+
+| Case | Before F1 | After F1 | F1 budget |
+|---|---|---|---|
+| hover over one button, 1080p | 0.354 ms | **0.046 ms** | 0.15 |
+| full redraw of the typical screen, 1080p | 4.17 ms | **0.63 ms** | 2 |
+| one rounded box with a border (92x24, r 4) | 30.0 us | **2.3 us** | - |
+| 1,000 visible buttons, full redraw | 24.9 ms | **2.87 ms** | 4 |
+| 100,000-line list, unchanged frame, culling only | 83 ms | **3.64 ms** | 20 |
+| the same list with `gy_scroll_rows` | - | draws exactly what a 100-line list draws (test `f1_cull`) | 0.5 |
+| 4-tile focus move | 135 tiles, 2.2 ms | **51 tiles, 0.18 ms** | 0.4 |
+| a 1,040 px line, 2 px wide | 1.45 ms | **0.11 ms** | 0.02 (miss) |
+| 512 -> 1024 image, bilinear | 19.2 ns/px | **6.4 ns/px** | 3 (miss) |
+| 512 -> 1024 image, nearest | 2.6 ns/px | **0.8 ns/px** | 1 |
+| startup to the first frame | 6.95 ms | **3.8 ms** | 30 |
+| a glyph miss | 34 us | 34 us | 20 (miss) |
+
+What changed:
+1. **Boxes:** per-pixel work only in the corner columns, the straight span one fill, the inside of
+   middle rows one fill, and a corner cache per (radius, border). Test `f1_corner_cache` checks it
+   against working out every pixel on 400 random boxes in quarter-pixel radii and borders.
+2. **Culling:** an instance or a line of text outside the clip isn't kept. The renderer sorts by
+   layer once and walks the list once (it was 3 times). Over half the tiles dirty means one plain
+   full redraw.
+3. `gy_scroll_rows(n, &first, &last)`.
+4. **Lines:** each row (or each column, for flat lines) only checks the span the line can reach.
+5. **Images:** source columns and weights worked out once per draw; bilinear does two channels
+   per multiply.
+6. **Tile focus outline:** drawn on its own.
+7. **Small:** SelectObject only on a font change; SSE2 for glyph rows under 16 px.
+8. **Frozen layouts:** `tests/golden/layouts-2026-11-22.txt` holds 5 saved layout lines with their
+   geometry, and test `old_layouts` checks every later step against it.
+9. **check_px.py:** 50 unscaled pixel sizes in the widget code (report only; D1 brings it to 0).
+
+Misses, said plainly:
+- **The line** is 13 times faster but over budget: the exact per-pixel division is kept for the
+  same bytes.
+- **Bilinear** is 3 times faster but over budget: SIMD lerp is the next step there if an app
+  needs it.
+- **The glyph miss** is GDI's own time. A single 1 MB-buffer GetGlyphOutline call was tried: GDI
+  was then 11 times slower and gave other pixels, so it was dropped.
+
+Size: `guicy.o` is now 87,728 / 7,958 / 75,520 (text / data / bss), about **95.7 KB** in an exe.
+That's +9.6 KB for F1 against the +4 KB estimate, leaving 24 KB of the 120 KB core.
+
+Demo window, hidden desktop, 3 runs: idle 0, 15.6 and 31.2 ms per 60 s (0 to 2 scheduler ticks);
+per mouse move 0.16, 0.33 and 0.23 ms (the PC was busy).
