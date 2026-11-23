@@ -22,8 +22,10 @@
            gy_check("Pixel look", &pixel);
        }
 
-   Status: step 4 of PLAN.md: every v1 widget, layers (popups, menus, tooltips), split panes,
-   scroll regions, images, the canvas, and tiling (each part of a tool in its own tile).
+   Status (0.5.0, 2026-11-23, feature freeze): every v1 widget, layers (popups, menus, tooltips),
+   split panes, scroll regions, images, the canvas (lines, dashes, polygons, ellipses), tiling with
+   developer locks, scaling with DPI, resolution, zoom and font size, fallback glyphs for any script,
+   the IME, keyboard focus. CPU renderer (scalar, SSE2, AVX2, byte-equal); see BENCH.md.
 */
 #ifndef GUICY_H
 #define GUICY_H
@@ -35,7 +37,7 @@
 extern "C" {
 #endif
 
-#define GUICY_VERSION "0.4.0"
+#define GUICY_VERSION "0.5.0"
 
 typedef uint32_t gy_color;                     /* premultiplied 0xAARRGGBB */
 #define GY_RGB(r, g, b) ((gy_color)(0xFF000000u | ((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b)))
