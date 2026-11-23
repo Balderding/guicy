@@ -421,3 +421,44 @@ Found on the way:
   caret, so it never covers the line. Shown, changed, committed and cancelled all work, typing
   arrives after it, and undo takes a commit back in one step. imm32 loads at run time, so there is no
   new library to link. `GUICY_NO_IME` drops it.
+
+## L1: developer locks (PLAN-v2, M2, 2026-11-23)
+
+| | |
+|---|---|
+| Commit | 7c3e343 |
+| Tests | **69/69** normal, **5/5** windowed; `--old-theme` 61/61 byte-equal to the pre-theme goldens |
+| Size | `guicy.o` 113,209 + 11,218 = **124.4 kB**: +5.0 against the +4 budget, 0.6 kB under the 125 kB cap |
+
+- **API:** `gy_tile_rule(name, (gy_rule){ .side, .w, .h, .tab_of, .lock })`, the flags `GY_LOCK_MOVE`,
+  `SIZE`, `CLOSE`, `FLOAT`, `TABS`, `SPLIT`, `ALL`, `gy_layout_lock(on)`, `gy_tiles_reset()` (the user's
+  key Alt+Shift+Backspace), and `GY_SPLIT_LOCK` for `gy_split` dividers.
+- **One gate** for the tile keys, title drags, drops and dividers. A refusal changes nothing, shows
+  "Locked: <name>" for 2 s, and eats the key. Locked titles show a padlock; locked dividers give no
+  resize cursor.
+- **`l1_flags`:** 8 user actions (swap key, title drag, grow key, divider drag, flip key, close key, a
+  tab dropped in, for TABS and for SPLIT). Each is refused on the locked tile, with the saved line
+  byte-equal, and done on the unlocked one. A refused tile key never reaches the app.
+- **`l1_size_resize`:** a SIZE-locked side panel stays 200 px at 900 and 1300 wide; unlocked, it goes
+  200 -> 290.
+- **`l1_layout_lock`:** with the layout locked, 4 actions on unlocked tiles are refused. Turned off,
+  the tile's own lock stays and the others move again.
+- **`l1_hostile_load`:** a hand-edited line put the locked tile in two places and stacked it with
+  Main. After the load it is back at its rule place and size, alone. The loader now refuses a tile
+  named twice and an empty stack.
+- **`l1_reset`:** after a swap, a grow and a close, Alt+Shift+Backspace gives the code layout's line
+  byte for byte.
+- **`l1_too_small`** (side locked at 400 DIPs):
+  - 1000 wide: 100 %, nothing changes.
+  - 700 wide: GUICy's own zoom goes to 90 % and the side stays 400 DIPs.
+  - 380 wide: 75 %, the locked size gives way (0.68, 272 DIPs) in the same place, with a gold note.
+  - Grown back: 100 % and 400 DIPs exactly.
+  - The window's smallest drag size is raised to fit the locked sizes, capped at the work area.
+- **`l1_split_lock`:** a locked `gy_split` divider doesn't move under a drag.
+- **`l1_fuzz`:** 10,000 random tile keys, drags, loads (including garbage), resets, resizes and opens.
+  After each one the locked panel is at x 4, 200 px, alone (or fills the window when it is the last
+  tile). Over the run the unlocked tiles moved and resized.
+- Placement found on the way: a tile with a side rule is never split or stacked into. When it is the
+  only tile, the next one goes beside the whole layout, opposite it.
+- Not built (as planned): the `GUICY_TILING_FULL` user locks and layout undo, and the plan's "one log
+  line" after a load re-applies the locks (GUICy has no log yet; the result is in the tests).

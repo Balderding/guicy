@@ -548,7 +548,7 @@ reasons.
 | G0: the spike lives in `bench/gyspike.c`, outside guicy.h | 0 | 98.2 | |
 | D1: one scale function, the em theme resolved per factor, monitors, zoom keys, high contrast | +6 | 104.2 | **+9.0, total 106.8: over, see below** |
 | X1: DirectWrite fallback glyphs (5-8), IME (1.5), Tab/Shift+Tab focus (1) | +10 | 114.2 | **+8.2, total 115.0** (fallback by our own cmap reader, not DirectWrite: see BENCH.md X1) |
-| L1: locks, the gate function, placement rules, the undo ring | +4 | 118.2 | |
+| L1: locks, the gate function, placement rules, the undo ring | +4 | 118.2 | **+5.0, total 124.4** (after the A1 gaps 118.6 and the theme 119.4; side-panel placement +1; the undo ring is GUICY_TILING_FULL, not built) |
 | A1-A3: the port hooks (timing hook, anything a port's API map finds missing) | +1.5 | **119.7** | |
 | **After D1, measured:** 106.8 + X1 10 + L1 4 + ports 1.5 | | **122.3: past the 120 kB cap** | the stop rule applies before X1 |
 | **After X1, measured:** 115.0 + L1 4 + ports 1.5 | | **120.5** of the 125 kB cap | |
