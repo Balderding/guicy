@@ -50,9 +50,12 @@ No app port happens without the user's OK.
 - A tile drag or layout change costs 1 ms or less of CPU per frame on the GPU path, and 4 ms or less
   on the CPU path, at 1540x950.
 
-## Open questions
+## Decided by the user (2026-11-22)
 
-1. Should the user be able to unlock what the developer locked? The plan says only when the
-   developer allows it (`gy_allow_user_lock`).
-2. On the GPU path, should the default in the apps be the GPU? The plan says yes when a real GPU
-   is found, because both paths idle at zero. Decide with the G1 numbers.
+1. **A developer lock can never be undone by the user:** "Not if the dev locked the windows." There
+   is no user override of a developer's lock, not even a setting the developer could turn on.
+   `gy_allow_user_lock` covers only the user's own locks on tiles the developer left unlocked.
+2. **The GPU is the default when it is faster:** "yes to the GPU if it is faster." At start,
+   GUICy uses the GPU path when there is a real GPU, and the G1 numbers show it beating the CPU
+   path on the same scenes. Otherwise the CPU path is the default. `GUICY_RENDER` still forces
+   either one.
