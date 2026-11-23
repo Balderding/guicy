@@ -99,7 +99,9 @@ int  gy_open(const gy_desc *d);               /* make the window; 1 on success *
 int  gy_frame(void);                          /* draw the last frame, sleep until something happens,
                                                  start the next; 0 when the window was closed */
 void gy_animate(int ms);                      /* ask for a frame in ms even with no input */
-void gy_wake(void);                           /* from any thread: run a frame soon */
+void gy_wake(void);                           /* from any thread: run a frame soon. It posts a message of
+                                                 its own (RegisterWindowMessageW "GUICy.wake"), so WM_APP and
+                                                 WM_USER and up stay all the app's: GUICy never takes them */
 void gy_tiles(int on);                        /* 0: redraw every pixel every frame (to test the tiles) */
 
 /* --- an app's own window and loop -------------------------------------------------------------- */
@@ -3804,8 +3806,16 @@ GY__SMALL static int gy__ime(HWND hw, UINT msg, LPARAM lp) {
 }
 #endif
 
+/* gy_wake's message: registered with Windows, so it can never be one of the app's own */
+static UINT gy__wake_msg(void) {
+    static volatile UINT m;
+    if (!m) m = RegisterWindowMessageW(L"GUICy.wake");
+    return m;
+}
+
 GY__SMALL static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res) {
     *res = 0;
+    if (msg >= 0xC000 && msg == gy__wake_msg()) { gy__c.passes = gy__maxi(gy__c.passes, 1); return 1; }   /* gy_wake */
     switch (msg) {
     case WM_MOUSEMOVE:
         if (!gy__c.tracking) {
@@ -3869,7 +3879,6 @@ GY__SMALL static int gy__handle(HWND hw, UINT msg, WPARAM wp, LPARAM lp, LRESULT
         EndPaint(hw, &ps);
         return 1;
     }
-    case WM_APP + 1: gy__c.passes = gy__maxi(gy__c.passes, 1); return 1;   /* gy_wake */
     case 0x02E0: {                             /* WM_DPICHANGED: take Windows' suggested rect at once */
         const RECT *nr = (const RECT *)lp;
         if (gy__c.scale_mode != GY_SCALE_FIXED) {
@@ -3990,7 +3999,7 @@ void gy_animate(int ms) {
     if (!gy__c.anim_on || (int)(at - gy__c.anim_at) < 0) { gy__c.anim_at = at; gy__c.anim_on = 1; }
 }
 
-void gy_wake(void) { if (gy__c.hwnd) PostMessageW(gy__c.hwnd, WM_APP + 1, 0, 0); }
+void gy_wake(void) { UINT m = gy__wake_msg(); if (gy__c.hwnd && m) PostMessageW(gy__c.hwnd, m, 0, 0); }
 
 int gy_frame(void) {
     MSG m;

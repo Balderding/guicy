@@ -171,3 +171,49 @@ static int t_a1_cut(void) {
     if (ok) LOG("3 cut with an ellipsis, Fits untouched, the whole text as the tip, the app's tip wins; ");
     return ok;
 }
+
+/* --- gap 5: an attached app's own WM_APP / WM_USER messages come back to it untouched, and
+   gy_wake still wakes GUICy (its message is a registered one) --------------------------------- */
+static int wm_got[4];
+static WPARAM wm_wp[4];
+static LRESULT CALLBACK wm_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (gy_event(h, m, (uintptr_t)w, (intptr_t)l)) return 0;
+    if (m == WM_APP) { wm_got[0]++; wm_wp[0] = w; return 0; }
+    if (m == WM_APP + 1) { wm_got[1]++; wm_wp[1] = w; return 0; }
+    if (m == WM_APP + 2) { wm_got[2]++; wm_wp[2] = w; return 0; }
+    if (m == WM_USER + 1) { wm_got[3]++; wm_wp[3] = w; return 0; }
+    return DefWindowProcW(h, m, w, l);
+}
+static void wm_pump(void) {
+    MSG m;
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+}
+static int t_w_app_msgs(void) {
+    WNDCLASSW wc;
+    HWND h;
+    int i, ok = 1;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = wm_proc; wc.hInstance = GetModuleHandleW(NULL); wc.lpszClassName = L"gytest_app_msgs";
+    RegisterClassW(&wc);
+    h = CreateWindowExW(0, L"gytest_app_msgs", L"gytest app msgs", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 300, 160, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(h != NULL, "no app window");
+    gy_scale_set(1);
+    if (!gy_attach(h)) { LOG("gy_attach: %s; ", gy_last_error()); DestroyWindow(h); return 0; }
+    gy_isa_set(g_isa);
+    memset(wm_got, 0, sizeof wm_got);
+    wm_pump();
+    gy_begin(); gy_text("app messages"); gy_end();
+    gy__c.passes = 0;
+    PostMessageW(h, WM_APP, 11, 0); PostMessageW(h, WM_APP + 1, 22, 0); PostMessageW(h, WM_APP + 2, 33, 0); PostMessageW(h, WM_USER + 1, 44, 0);
+    wm_pump();
+    for (i = 0; i < 4; i++) if (wm_got[i] != 1 || wm_wp[i] != (WPARAM)(11 * (i + 1))) { LOG("message %d reached the app %d times (wParam %d); ", i, wm_got[i], (int)wm_wp[i]); ok = 0; }
+    if (gy_wants_frame()) { LOG("the app's own messages asked GUICy for a frame; "); ok = 0; }
+    gy_wake();
+    wm_pump();
+    if (!gy_wants_frame()) { LOG("gy_wake did not wake GUICy; "); ok = 0; }
+    for (i = 0; i < 4; i++) if (wm_got[i] != 1) { LOG("gy_wake reached the app as message %d; ", i); ok = 0; }
+    gy_begin(); gy_text("app messages"); gy_end();
+    g_win_to_destroy = h;
+    if (ok) LOG("WM_APP, WM_APP+1, WM_APP+2 and WM_USER+1 came back to the app once each, wParam kept; gy_wake woke GUICy only; ");
+    return ok;
+}
