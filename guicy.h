@@ -2637,7 +2637,7 @@ static uint32_t gy__box_px(const gy__inst *in, float px, float py, float cx, flo
 static void gy__draw_box_cpu(const gy__inst *in, gy_rect clip) {
     int x0 = gy__maxi(in->x0, clip.x), y0 = gy__maxi(in->y0, clip.y);
     int x1 = gy__mini(in->x1, clip.x + clip.w), y1 = gy__mini(in->y1, clip.y + clip.h);
-    int n = x1 - x0, x, y, band;
+    int n = x1 - x0, x, y, band, cw, lx1, rx0;
     float cx = (float)(in->x0 + in->x1) * 0.5f, cy = (float)(in->y0 + in->y1) * 0.5f;
     float hx = (float)(in->x1 - in->x0) * 0.5f, hy = (float)(in->y1 - in->y0) * 0.5f;
     uint32_t *row;
@@ -2647,17 +2647,40 @@ static void gy__draw_box_cpu(const gy__inst *in, gy_rect clip) {
         for (y = y0; y < y1; y++) gy__c.k_fill(gy__c.px + (size_t)y * gy__c.w + x0, n, in->col0);
         return;
     }
-    /* rows away from the top and bottom edge bands depend only on x: work one row out, reuse it */
+    /* Rows away from the top and bottom edge bands depend only on x: one row is worked out and
+       reused. Across every row, the pixels more than cw from the left and right edges all get the
+       same value (their distance to the box depends on y only: qx stays below qy, so max(qx, qy)
+       is qy and the corner length has no x part), so only the two corner columns are done pixel
+       by pixel and the span between them is one fill. Same bytes as doing every pixel (gytest). */
     band = (int)(gy__maxf(in->radius, in->border) + 1.0f);
+    cw = (int)(in->radius + in->border) + 3;
+    if (2 * cw >= in->x1 - in->x0) cw = in->x1 - in->x0;  /* narrow: every pixel by itself */
+    lx1 = gy__clampi(in->x0 + cw, x0, x1);     /* [x0, lx1) the left corner columns (inside the clip) */
+    rx0 = gy__clampi(in->x1 - cw, lx1, x1);    /* [rx0, x1) the right ones; between them the span */
     mark = gy__c.frame.used;
     row = (uint32_t *)gy__arena_push(&gy__c.frame, sizeof(uint32_t) * (size_t)n);
     if (!row) return;
-    for (x = 0; x < n; x++) row[x] = gy__box_px(in, (float)(x0 + x) + 0.5f, cy, cx, cy, hx, hy);
+    for (x = x0; x < lx1; x++) row[x - x0] = gy__box_px(in, (float)x + 0.5f, cy, cx, cy, hx, hy);
+    for (x = rx0; x < x1; x++) row[x - x0] = gy__box_px(in, (float)x + 0.5f, cy, cx, cy, hx, hy);
     for (y = y0; y < y1; y++) {
-        uint32_t *d = gy__c.px + (size_t)y * gy__c.w + x0;
-        if (y >= in->y0 + band && y < in->y1 - band) { gy__c.k_row(d, row, n); continue; }
-        for (x = 0; x < n; x++) {
-            uint32_t s = gy__box_px(in, (float)(x0 + x) + 0.5f, (float)y + 0.5f, cx, cy, hx, hy);
+        uint32_t *d = gy__c.px + (size_t)y * gy__c.w;
+        uint32_t mid;
+        if (y >= in->y0 + band && y < in->y1 - band) {     /* a middle row: edges from the row, inside filled */
+            if (lx1 > x0) gy__c.k_row(d + x0, row, lx1 - x0);
+            if (rx0 > lx1) gy__c.k_fill(d + lx1, rx0 - lx1, in->col0);
+            if (x1 > rx0) gy__c.k_row(d + rx0, row + (rx0 - x0), x1 - rx0);
+            continue;
+        }
+        for (x = x0; x < lx1; x++) {
+            uint32_t s = gy__box_px(in, (float)x + 0.5f, (float)y + 0.5f, cx, cy, hx, hy);
+            if (s) d[x] = gy__over(d[x], s);
+        }
+        if (rx0 > lx1) {
+            mid = gy__box_px(in, cx, (float)y + 0.5f, cx, cy, hx, hy);
+            gy__c.k_fill(d + lx1, rx0 - lx1, mid);
+        }
+        for (x = rx0; x < x1; x++) {
+            uint32_t s = gy__box_px(in, (float)x + 0.5f, (float)y + 0.5f, cx, cy, hx, hy);
             if (s) d[x] = gy__over(d[x], s);
         }
     }
