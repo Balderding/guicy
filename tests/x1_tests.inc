@@ -239,3 +239,33 @@ out:
     gy__os = keep;
     return ok;
 }
+
+/* --- no font has it: a stripped Windows (every fallback face missing: only the app's own font
+   answers) and a character no font has (U+10FFFD). Each draws the font's own missing-glyph mark,
+   is counted once, is named in gy_last_error, and nothing crashes. ------------------------------- */
+static gy__os_t nf_saved;
+static DWORD WINAPI nf_font_data(HDC dc, DWORD tag, DWORD off, PVOID buf, DWORD n) {
+    WCHAR face[64];
+    if (GetTextFaceW(dc, 64, face) && lstrcmpiW(face, gy__c.fonts[0].face)) return GDI_ERROR;
+    return nf_saved.font_data(dc, tag, off, buf, n);
+}
+static void nf_scene(void) {
+    gy_begin();
+    gy_text("Stripped Windows: \xe6\x97\xa5\xe6\x9c\xac");
+    gy_text("No font at all: \xf4\x8f\xbf\xbd");
+    gy_end();
+}
+static int t_x1_no_font(void) {
+    int ok = 1;
+    gy_shutdown();
+    if (!open_at(420, 90)) return 0;
+    nf_saved = gy__os;
+    gy__os.font_data = nf_font_data;
+    nf_scene(); nf_scene(); nf_scene();
+    gy__os = nf_saved;
+    if (gy_get_stats().no_font != 3) { LOG("%d characters counted with no font, want 3 (each once); ", gy_get_stats().no_font); ok = 0; }
+    if (!strstr(gy_last_error(), "U+10fffd")) { LOG("the error says \"%s\"; ", gy_last_error()); ok = 0; }
+    if (!gy__glyph_get(0, 0x672C)->ok || !gy__glyph_get(0, 0x10FFFD)->ok) { LOG("no missing-glyph mark drawn; "); ok = 0; }
+    if (ok) LOG("3 characters with no font: each drawn as the font's mark, counted once, \"%s\"; ", gy_last_error());
+    return ok;
+}

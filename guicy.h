@@ -265,6 +265,8 @@ typedef struct gy_stats {
     int tiles, dirty_tiles;                   /* this frame: all tiles, tiles drawn again */
     int frames, frames_drawn;                 /* since start: frames, frames that changed a pixel */
     unsigned next_wake_ms;                    /* when gy_animate wants the next frame (0: never) */
+    int no_font;                               /* characters no installed font has (drawn as the font's
+                                                  missing-glyph mark; the last one named in gy_last_error) */
 } gy_stats;
 gy_stats gy_get_stats(void);
 const char *gy_last_error(void);              /* "" when there is none */
@@ -589,7 +591,7 @@ typedef struct gy__ctx {
     unsigned char *pages[GY__MAX_PAGES];
     int npages, shelf_x, shelf_y, shelf_h;
     unsigned char *scratch;                    /* GetGlyphOutline output */
-    int glyph_misses;
+    int glyph_misses, no_font;
 
     /* edit box */
     char undo[16][256];
@@ -959,7 +961,7 @@ void gy_error(const char *text) { gy__strcpy(gy__c.banner, text ? text : "", siz
 
 gy_stats gy_get_stats(void) {
     gy_stats s;
-    s.instances = gy__c.ninst; s.glyph_misses = gy__c.glyph_misses; s.fonts = gy__c.nfonts; s.atlas_pages = gy__c.npages;
+    s.instances = gy__c.ninst; s.glyph_misses = gy__c.glyph_misses; s.no_font = gy__c.no_font; s.fonts = gy__c.nfonts; s.atlas_pages = gy__c.npages;
     s.tiles = gy__c.tiles_x * gy__c.tiles_y; s.dirty_tiles = gy__c.dirty_tiles; s.frames = gy__c.frames; s.frames_drawn = gy__c.frames_drawn;
     s.next_wake_ms = gy__c.anim_on ? gy__c.anim_at : 0;
     return s;
@@ -1313,6 +1315,7 @@ static unsigned gy__cmap_gid(const gy__cmap *m, uint32_t c) {
 
 /* which font draws cp for font f: selects it into the DC; *code and *how become a glyph number when
    it isn't f's own character. The user's language picks the Han face (Japanese, Chinese, Korean). */
+static void gy__fmt(char *out, int cap, const char *f, ...);
 static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
     unsigned gid = 0;
     int i, k;
@@ -1348,7 +1351,12 @@ static void gy__fallback(gy__font *f, uint32_t cp, UINT *code, UINT *how) {
         }
         if (m->fmt > 0 && (gid = gy__cmap_gid(m, cp)) != 0) { gy__select(f->fbh[k]); *code = gid; *how |= GGO_GLYPH_INDEX; return; }
     }
-    gy__select(f->hf);                         /* no font has it: the font's own missing-glyph box */
+    gy__select(f->hf);                         /* no font has it: the font's own missing-glyph box, */
+    {   char m[32];                            /* said once per character (the glyph cache keeps the box) */
+        gy__fmt(m, sizeof m, "U+%x", (unsigned)cp);
+        gy__set_error("GUICy: no installed font has this character", m);
+        gy__c.no_font++;
+    }
 }
 #endif
 
