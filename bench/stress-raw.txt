@@ -1,0 +1,172 @@
+
+### 8. First-frame costs (cold process, 1540x950)
+
+| step | ms | note |
+|---|---|---|
+| process start to main | 18.60 | from GetProcessTimes creation time (loader, CRT) |
+| context init (first gy_theme_get: arenas, glyph table, DC, CreateFont Segoe UI 15) | 0.216 | |
+| a second font (gy_font_add Consolas 15) | 0.016 | |
+| gy_offscreen(1540, 950) (frame memory + clear) | 0.980 | |
+| first frame of the typical scene | 5.758 | UI pass 2.216 (glyph misses: 53), gy_end 3.542 |
+| second frame (warm glyphs, unchanged) | 0.023 | |
+| **library startup to first frame** (init + offscreen + first frame) | **6.95** | budget <= 30 ms: **pass** |
+| 1,024 new glyphs in one frame (atlas fill) | 35.552 | 1024 misses, 34.1 us per miss (UI pass 34.885); atlas pages 1 |
+| the same frame again (all hits) | 0.037 | |
+
+gystress: GUICy 0.4.0, CPU Intel(R) Core(TM) i9-10980XE CPU @ 3.00GHz, best kernels avx2, QPC 10000000 Hz
+
+### 1. Typical app screen, 1540x950 (kernels avx2)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| first frame (cold: 53 glyph misses) | 1 | 5.646 | 5.646 | 2.097 | 3.549 | 375 | 481 |  |
+| unchanged frame | 300 | 0.015 | 0.019 | 0.009 | 0.006 | 0 | 481 | UI pass <= 0.2 **pass** |
+| hover over one button (on/off each frame) | 300 | 0.277 | 0.308 | 0.009 | 0.267 | 8 | 481 | <= 0.3 ms **pass** |
+| full redraw, warm (gy_tiles(0)), 1540x950 | 200 | 3.317 | 3.445 | 0.012 | 3.306 | 375 | 481 |  |
+| typing one char (char / backspace alternately) | 300 | 0.059 | 0.068 | 0.009 | 0.050 | 1 | 482 | <= 0.3 ms (as a caret frame) **pass** |
+| dragging a slider (3 px a frame) | 300 | 0.166 | 0.246 | 0.009 | 0.158 | 7 | 482 |  |
+
+### 1. Typical app screen, 1920x1080 (kernels avx2)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| first frame (cold: 53 glyph misses) | 1 | 6.245 | 6.245 | 2.066 | 4.179 | 510 | 481 |  |
+
+overdraw, typical scene (1920x1080 = 2.07 Mpx): plain rect 1 (0.00 Mpx); rounded or bordered box 35 (0.44 Mpx); glyph 301 (0.02 Mpx); line 18 (0.01 Mpx); image 2 (0.01 Mpx); off screen or clipped away 124; total 0.47 Mpx = 0.23x the frame
+| unchanged frame | 300 | 0.015 | 0.016 | 0.009 | 0.006 | 0 | 481 | UI pass <= 0.2 **pass** |
+| hover over one button (on/off each frame) | 300 | 0.338 | 0.369 | 0.009 | 0.329 | 10 | 481 | <= 0.3 ms **MISS** |
+| full redraw, warm (gy_tiles(0)), 1920x1080 | 200 | 4.207 | 4.310 | 0.012 | 4.195 | 510 | 481 | <= 4 ms at 1080p **MISS** |
+| typing one char (char / backspace alternately) | 300 | 0.062 | 0.068 | 0.009 | 0.052 | 1 | 482 | <= 0.3 ms (as a caret frame) **pass** |
+| dragging a slider (3 px a frame) | 300 | 0.185 | 0.252 | 0.009 | 0.176 | 7 | 482 |  |
+
+### 4. Animated scene at 1920x1080: a progress bar moves every frame
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| tiles on | 300 | 0.160 | 0.264 | 0.009 | 0.152 | 3 | 481 | <= 0.3 ms (a few tiles) **pass** |
+| tiles off (gy_tiles(0), full redraw) | 300 | 4.159 | 4.306 | 0.012 | 4.146 | 510 | 481 | <= 4 ms **MISS** |
+
+### 1. Typical app screen, 2560x1440 (kernels avx2)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| first frame (cold: 53 glyph misses) | 1 | 7.697 | 7.697 | 2.068 | 5.629 | 920 | 481 |  |
+| unchanged frame | 300 | 0.015 | 0.015 | 0.009 | 0.007 | 0 | 481 | UI pass <= 0.2 **pass** |
+| hover over one button (on/off each frame) | 300 | 0.438 | 0.466 | 0.009 | 0.429 | 13 | 481 | <= 0.3 ms **MISS** |
+| full redraw, warm (gy_tiles(0)), 2560x1440 | 200 | 5.449 | 5.747 | 0.012 | 5.438 | 920 | 481 |  |
+| typing one char (char / backspace alternately) | 300 | 0.060 | 0.072 | 0.009 | 0.051 | 1 | 482 | <= 0.3 ms (as a caret frame) **pass** |
+| dragging a slider (3 px a frame) | 300 | 0.188 | 0.252 | 0.009 | 0.179 | 7 | 482 |  |
+
+memory at 2560x1440 after scene 1: perm arena committed 18.0 MB, frame arena committed 1.0 MB, atlas pages 1 (1 MB each), process private 20.4 MB
+
+### 2a. Text list at 1920x1080, 1 column, default font (about 30 lines visible): does cost grow with total rows?
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| 1000 lines (1 cols), unchanged | 60 | 0.505 | 0.521 | 0.406 | 0.094 | 0 | 19895 |  |
+| 1000 lines (1 cols), wheel one notch each frame | 60 | 1.091 | 1.124 | 0.407 | 0.680 | 52 | 19895 |  |
+| 1000 lines (1 cols), full redraw | 30 | 2.444 | 2.585 | 0.416 | 2.025 | 510 | 19895 |  |
+| 10000 lines (1 cols), unchanged | 60 | 5.980 | 6.261 | 4.496 | 1.497 | 0 | 208896 |  |
+| 10000 lines (1 cols), wheel one notch each frame | 60 | 7.832 | 7.972 | 4.452 | 3.402 | 51 | 208896 |  |
+| 10000 lines (1 cols), full redraw | 30 | 10.201 | 10.452 | 4.539 | 5.698 | 510 | 208896 |  |
+| 100000 lines (1 cols), unchanged | 15 | 83.442 | 84.348 | 60.232 | 23.198 | 0 | 2188897 |  |
+| 100000 lines (1 cols), wheel one notch each frame | 15 | 106.155 | 106.516 | 59.414 | 46.671 | 51 | 2188897 |  |
+| 100000 lines (1 cols), full redraw | 10 | 115.844 | 116.744 | 59.833 | 56.012 | 510 | 2188897 |  |
+
+### 2b. About 2,000 visible lines: 3840x2160, 13 columns, 11 px font, 13 px rows, gap 1
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| 2000 lines (13 cols), unchanged | 60 | 1.494 | 1.529 | 0.887 | 0.605 | 0 | 40895 |  |
+| 2000 lines (13 cols), wheel one notch each frame | 60 | 21.759 | 24.183 | 0.931 | 20.817 | 1326 | 40895 |  |
+| 2000 lines (13 cols), full redraw | 30 | 15.964 | 16.219 | 0.905 | 15.045 | 2040 | 40895 |  |
+| 10000 lines (13 cols), unchanged | 60 | 6.196 | 6.395 | 4.420 | 1.791 | 0 | 208896 |  |
+| 10000 lines (13 cols), wheel one notch each frame | 60 | 18.424 | 18.853 | 4.566 | 13.863 | 556 | 208896 |  |
+| 10000 lines (13 cols), full redraw | 30 | 24.034 | 26.606 | 4.707 | 19.324 | 2040 | 208896 |  |
+| 100000 lines (13 cols), unchanged | 15 | 83.740 | 85.955 | 60.269 | 23.440 | 0 | 2188897 |  |
+| 100000 lines (13 cols), wheel one notch each frame | 15 | 118.653 | 118.996 | 60.039 | 58.504 | 584 | 2188897 |  |
+| 100000 lines (13 cols), full redraw | 10 | 128.155 | 129.635 | 59.295 | 68.686 | 2040 | 2188897 |  |
+
+### 3. Many buttons, gy_grid(100) at 1920x1080 (16 columns, in a scroll region; about 560 on screen)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| 1000 buttons, unchanged | 100 | 0.143 | 0.159 | 0.101 | 0.042 | 0 | 4892 | UI pass <= 0.2 **pass** |
+| 1000 buttons, hover on/off | 100 | 0.306 | 0.338 | 0.102 | 0.204 | 3 | 4892 | <= 0.3 ms **MISS** |
+| 1000 buttons, full redraw | 50 | 21.081 | 21.723 | 0.111 | 20.960 | 510 | 4892 | <= 4 ms **MISS** |
+| 5000 buttons, unchanged | 100 | 0.867 | 0.884 | 0.666 | 0.200 | 0 | 28892 | UI pass <= 0.2 **MISS** |
+| 5000 buttons, hover on/off | 100 | 1.207 | 1.249 | 0.666 | 0.544 | 3 | 28892 | <= 0.3 ms **MISS** |
+| 5000 buttons, full redraw | 50 | 21.225 | 21.788 | 0.655 | 20.573 | 510 | 28892 | <= 4 ms **MISS** |
+| 20000 buttons, unchanged | 100 | 3.760 | 3.881 | 2.912 | 0.851 | 0 | 128892 | UI pass <= 0.2 **MISS** |
+| 20000 buttons, hover on/off | 100 | 4.817 | 4.929 | 2.952 | 1.858 | 3 | 128892 | <= 0.3 ms **MISS** |
+| 20000 buttons, full redraw | 50 | 25.913 | 26.487 | 3.038 | 22.852 | 510 | 128892 | <= 4 ms **MISS** |
+
+### 3b. 1,000 buttons all on screen (gy_grid(100), rows 11 px, gap 1, at 1920x1080)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| 1,000 visible, unchanged | 100 | 0.154 | 0.163 | 0.106 | 0.048 | 0 | 4892 | UI pass <= 0.2 **pass** |
+| 1,000 visible, hover on/off | 100 | 0.334 | 0.349 | 0.106 | 0.227 | 3 | 4892 | <= 0.3 ms **MISS** |
+| 1,000 visible, full redraw | 50 | 24.397 | 25.535 | 0.110 | 24.281 | 510 | 4892 | <= 4 ms **MISS** |
+
+### 5. Tiling at 1920x1080: n tiles, each with a text, a button, a check box and a slider
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| 4 tiles (0 stacked as tabs), unchanged | 200 | 0.006 | 0.006 | 0.003 | 0.003 | 0 | 132 | UI pass <= 0.2 **pass** |
+(4 tiles: 4 leaves, 0 under the 160x110 minimum, smallest w 473, smallest h 533; focus node 0 -> Alt+Right 5 -> Alt+Left 0; layout H0.500(V0.500(H0.500([Tile0],[Tile3]),[Tile2]),[Tile1]))
+| 4 tiles, focus move (Alt+Right / Alt+Left) | 100 | 2.176 | 2.261 | 0.004 | 2.172 | 135 | 132 | <= 0.3 ms **MISS** |
+| 4 tiles, layout change (Alt+Plus / Alt+Minus) | 100 | 2.140 | 2.230 | 0.004 | 2.136 | 135 | 132 |  |
+| 4 tiles, layout change (Alt+F flip) | 100 | 2.932 | 3.204 | 0.004 | 2.928 | 135 | 132 |  |
+| 12 tiles (5 stacked as tabs), unchanged | 200 | 0.010 | 0.011 | 0.006 | 0.004 | 0 | 259 | UI pass <= 0.2 **pass** |
+(12 tiles: 7 leaves, 0 under the 160x110 minimum, smallest w 233, smallest h 128; focus node 0 -> Alt+Right 9 -> Alt+Left 11; layout H0.500(V0.500(H0.500(V0.500(H0.500(V0.500([Tile0|Tile7|Tile8|Tile9|Tile10|Tile11],[Tile6]),[Tile5]),[Tile4]),[Tile3]),[Tile2]),[Tile1]))
+| 12 tiles, focus move (Alt+Right / Alt+Left) | 100 | 0.923 | 0.973 | 0.007 | 0.917 | 34 | 259 | <= 0.3 ms **MISS** |
+| 12 tiles, layout change (Alt+Plus / Alt+Minus) | 100 | 0.666 | 0.699 | 0.006 | 0.659 | 20 | 259 |  |
+| 12 tiles, layout change (Alt+F flip) | 100 | 0.633 | 0.692 | 0.007 | 0.627 | 20 | 259 |  |
+| 32 tiles (7 stacked as tabs), unchanged | 200 | 0.032 | 0.034 | 0.023 | 0.008 | 0 | 872 | UI pass <= 0.2 **pass** |
+(32 tiles: 25 leaves, 19 under the 160x110 minimum, smallest w -6, smallest h -5; focus node 0 -> Alt+Right 0 -> Alt+Left 0; layout H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(V0.500(H0.500(H0.500(V0.500(H0.500(V0.500(H0.500(H0.500...)
+| 32 tiles, focus move (Alt+Right / Alt+Left) | 100 | 0.031 | 0.031 | 0.023 | 0.008 | 0 | 872 | <= 0.3 ms **pass** |
+| 32 tiles, layout change (Alt+Plus / Alt+Minus) | 100 | 0.140 | 0.152 | 0.024 | 0.116 | 1 | 872 |  |
+| 32 tiles, layout change (Alt+F flip) | 100 | 0.133 | 0.151 | 0.023 | 0.111 | 1 | 872 |  |
+
+### 6. Resize: 30 sizes in a row, 800x500 up to 2560x1440 (typical scene; each frame a full redraw)
+
+| case | frames | median ms | p95 ms | UI pass ms (median) | gy_end ms (median) | dirty tiles | instances | budget |
+|---|---|---|---|---|---|---|---|---|
+| resize frame (gy_offscreen + frame) | 30 | 4.941 | 7.742 | 0.013 | 3.861 | 390 | 481 |  |
+
+resize: gy_offscreen median 1.066 ms; frame alone median 3.875 ms, max 5.618 ms; 2.10 ns per pixel; process private grew 204.4 MB over the 30 sizes (perm arena 213.0 MB committed)
+
+### 7. Kernels at frame scale, 1920x1080, full-redraw path (gy_tiles(0)); draw ms = gy_end minus an empty frame's gy_end
+
+| case | kernels | gy_clear ms or draw ms (median) | p95 | UI pass ms | instances | ns per pixel or per item |
+|---|---|---|---|---|---|---|
+| full 1920x1080 clear (gy_clear) | avx2 | 0.304 | 0.325 | - | - | 0.147 ns/px |
+| empty frame, full redraw (clear + hash pass) | avx2 | 0.298 | 0.322 | 0.000 | 0 | - |
+| 1,000 rounded boxes 92x24, r 4, border 1 | avx2 | 29.561 | 30.972 | 0.008 | 1000 | 29561.0 ns per box |
+| 10,000 glyphs (100 lines of 100) | avx2 | 2.616 | 2.685 | 0.147 | 10200 | 256.5 ns per glyph |
+| 512x512 image to 1024x1024, bilinear | avx2 | 20.131 | 20.579 | 0.000 | 1 | 19.2 ns per pixel |
+| 512x512 image to 1024x1024, nearest | avx2 | 2.726 | 2.864 | 0.000 | 1 | 2.6 ns per pixel |
+| 1,000 plain rects 92x24 (for comparison) | avx2 | 0.471 | 0.500 | 0.008 | 1000 | 470.6 ns per box |
+| 200 lines 2 px wide, ~1,040 px long | avx2 | 295.932 | 341.930 | 0.004 | 200 | 1479658.0 ns per line |
+| full 1920x1080 clear (gy_clear) | sse2 | 0.307 | 0.322 | - | - | 0.148 ns/px |
+| empty frame, full redraw (clear + hash pass) | sse2 | 0.305 | 0.319 | 0.000 | 0 | - |
+| 1,000 rounded boxes 92x24, r 4, border 1 | sse2 | 31.185 | 34.146 | 0.009 | 1000 | 31185.0 ns per box |
+| 10,000 glyphs (100 lines of 100) | sse2 | 2.198 | 2.236 | 0.151 | 10200 | 215.5 ns per glyph |
+| 512x512 image to 1024x1024, bilinear | sse2 | 20.685 | 20.882 | 0.001 | 1 | 19.7 ns per pixel |
+| 512x512 image to 1024x1024, nearest | sse2 | 3.097 | 3.159 | 0.000 | 1 | 3.0 ns per pixel |
+| 1,000 plain rects 92x24 (for comparison) | sse2 | 0.497 | 0.529 | 0.008 | 1000 | 496.7 ns per box |
+| 200 lines 2 px wide, ~1,040 px long | sse2 | 296.613 | 308.329 | 0.005 | 200 | 1483066.5 ns per line |
+| full 1920x1080 clear (gy_clear) | scalar | 0.344 | 0.356 | - | - | 0.166 ns/px |
+| empty frame, full redraw (clear + hash pass) | scalar | 0.344 | 0.356 | 0.000 | 0 | - |
+| 1,000 rounded boxes 92x24, r 4, border 1 | scalar | 31.862 | 32.328 | 0.009 | 1000 | 31862.4 ns per box |
+| 10,000 glyphs (100 lines of 100) | scalar | 4.155 | 4.302 | 0.164 | 10200 | 407.4 ns per glyph |
+| 512x512 image to 1024x1024, bilinear | scalar | 21.395 | 21.510 | 0.001 | 1 | 20.4 ns per pixel |
+| 512x512 image to 1024x1024, nearest | scalar | 3.715 | 6.217 | 0.000 | 1 | 3.5 ns per pixel |
+| 1,000 plain rects 92x24 (for comparison) | scalar | 0.498 | 0.533 | 0.008 | 1000 | 498.2 ns per box |
+| 200 lines 2 px wide, ~1,040 px long | scalar | 296.725 | 302.914 | 0.004 | 200 | 1483623.5 ns per line |
+
+gystress: done in 136.2 s
+{"app": "guicy_demo", "exe_kb": 142, "desktop": "guicy_bench", "start_ms": 59, "visible": true, "idle_cpu_ms_per_60s": 0.0, "idle_cpu_pct_core": 0.0, "move_cpu_ms_each": 0.104, "client": [1540, 950], "peak_ws_mb": 34.1}
+{"app": "guicy_demo", "exe_kb": 142, "desktop": "guicy_bench", "start_ms": 55, "visible": true, "idle_cpu_ms_per_60s": 0.0, "idle_cpu_pct_core": 0.0, "move_cpu_ms_each": 0.078, "client": [1540, 950], "peak_ws_mb": 34.0}
+{"app": "guicy_demo", "exe_kb": 142, "desktop": "guicy_bench", "start_ms": 70, "visible": true, "idle_cpu_ms_per_60s": 46.9, "idle_cpu_pct_core": 0.078, "move_cpu_ms_each": 0.142, "client": [1540, 950], "peak_ws_mb": 34.1}

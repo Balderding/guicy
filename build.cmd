@@ -20,4 +20,5 @@ clang %CLANG_FLAGS% %W% %D% -static -o build\gytest.exe tests\gytest.c -lgdi32 |
 clang %CLANG_FLAGS% %W% -static -o build\probe_dwrite.exe tests\probe_dwrite.c || exit /b 1
 clang %CLANG_FLAGS% %W% %D% -static -mwindows -o build\demo.exe examples\demo.c -lgdi32 -luser32 || exit /b 1
 clang %CLANG_FLAGS% %W% -static -o build\gybench.exe bench\gybench.c -lgdi32 -luser32 || exit /b 1
-echo built build\gytest.exe build\probe_dwrite.exe build\demo.exe build\gybench.exe build\guicy.o
+clang %CLANG_FLAGS% %W% -static -o build\gystress.exe bench\gystress.c -lgdi32 -luser32 -lpsapi || exit /b 1
+echo built build\gytest.exe build\probe_dwrite.exe build\demo.exe build\gybench.exe build\gystress.exe build\guicy.o
