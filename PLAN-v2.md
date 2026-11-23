@@ -495,9 +495,27 @@ reasons.
 
 | Thing | Budget | Today |
 |---|---|---|
-| Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | 120 KB; 140 KB | about 86 KB (i) |
-| Core estimate through L1: F1 +4, H1 +2, D1 +6.5, X1 +9 to +12, L1 +4 | about 112-115 KB | |
-| Through G2, T1, P1 (default parts +8) | about 120-123 KB, at or over the cap | |
+| Core KB, (i) and (ii), `GUICY_NO_GPU`; default build with the GPU path | 120 KB; 140 KB | **95.7 KB** (i), after F1 |
+
+**KB budget per step** (code + data of `guicy.o`, `GUICY_NO_GPU`; written 2026-11-23 after F1 came in at
++9.6 KB against its +4 estimate; the actual goes in each done-report beside its budget):
+
+| Step | Budget | Running total | Measured |
+|---|---|---|---|
+| (F1 done) | +4 (estimate) | | **+9.6, total 95.7** |
+| H1: gy_attach/gy_event, the OS table, the test desktop guard, the test font hook, the text-record hook (tests only) | +2.5 | 98.2 | |
+| G0: the spike lives in `bench/gyspike.c`, outside guicy.h | 0 | 98.2 | |
+| D1: one scale function, the em theme resolved per factor, monitors, zoom keys, high contrast | +6 | 104.2 | |
+| X1: DirectWrite fallback glyphs (5-8), IME (1.5), Tab/Shift+Tab focus (1) | +10 | 114.2 | |
+| L1: locks, the gate function, placement rules, the undo ring | +4 | 118.2 | |
+| A1-A3: the port hooks (timing hook, anything a port's API map finds missing) | +1.5 | **119.7** | |
+| G2, T1, P1 default parts | +8 | **127.7: over the cap** | |
+
+**Stop rule (Master Control, 2026-11-23):** if a step's measured size plus the budgets still to come
+passes 120 KB, the step stops before it is built and Master Control is told, so **the user decides
+what gives**. Through the ports the budget holds with about 0.3 KB to spare. G2/T1/P1 as planned
+would pass the cap by about 8 KB, so that decision comes to the user before G2, with the cut list
+below as the options.
 | `hello.exe`, `GUICY_SMALL` | 40 KB of GUICy | not measured |
 | Idle, both renderers | 0 frames and 0 presents per 60 s | 0-15.6 ms CPU |
 | Hover / full redraw, 1080p, CPU path (reported) | 0.15 ms / 2 ms (after F1) | 0.34 / 4.2 ms |
